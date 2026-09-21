@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+websockets
+httpx
+edge-tts
+SpeechRecognition
+pydub
+faster-whisper
+ddgs
+PyMuPDF
+pillow
+mss
+psutil

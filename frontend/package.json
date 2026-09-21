@@ -1,0 +1,17 @@
+{
+  "name": "igris",
+  "version": "1.0.0",
+  "description": "Igris AI Assistant",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron . --no-sandbox"
+  },
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "electron": "^30.5.1"
+  },
+  "allowScripts": {
+    "electron": true
+  }
+}
