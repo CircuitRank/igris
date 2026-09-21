@@ -11,6 +11,7 @@ Before you begin, ensure you have the following installed on your system:
 - **Git** (for downloading the repository)
 - **Python 3.10+** (for the AI backend)
 - **Node.js & npm** (for the frontend UI)
+- **Ollama** (for running the local LLM)
 
 ---
 
@@ -20,9 +21,18 @@ Open Command Prompt or PowerShell and run the following command to download the 
 git clone https://github.com/YOUR_USERNAME/igris.git
 cd igris
 ```
-*(Note: Replace `YOUR_USERNAME` with your actual GitHub username or repository link if hosted online. Otherwise, you can initialize it from a local network share).*
+*(Note: Replace `YOUR_USERNAME` with your actual GitHub username or repository link if hosted online).*
 
-### Step 2: Setup the Python Backend
+### Step 2: Setup Ollama (Local AI Model)
+Igris relies on a local LLM to process your conversational commands.
+1. Download and install **Ollama** for Windows from [ollama.com/download/windows](https://ollama.com/download/windows).
+2. Once installed, open a Command Prompt or PowerShell and pull the exact model Igris is configured to use:
+```cmd
+ollama pull qwen2.5-coder:3b
+```
+*Wait for the download to finish. Ensure the Ollama app remains running in your system tray.*
+
+### Step 3: Setup the Python Backend
 Igris requires a local Python server to run the Whisper AI model and handle system commands. 
 
 Run these commands to create a virtual environment and install the dependencies:
@@ -32,16 +42,16 @@ python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
 ```
-*Keep this terminal window open. You will need it to run the backend in Step 4.*
+*Keep this terminal window open. You will need it to run the backend in Step 5.*
 
-### Step 3: Setup the Electron Frontend
+### Step 4: Setup the Electron Frontend
 Open a **new** Command Prompt or PowerShell window, navigate to the `frontend` folder, and install the Node modules:
 ```cmd
 cd path\to\igris\frontend
 npm install
 ```
 
-### Step 4: Run Igris
+### Step 5: Run Igris
 To start the application, you need to run both the backend and frontend simultaneously.
 
 **1. Start the Backend:**

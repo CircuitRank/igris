@@ -8,8 +8,16 @@
       "pinnedAt": 1790011720711,
       "auto": "recent-edit",
       "expiresAt": 1790015320711
+    },
+    {
+      "path": "/home/voldemort/igris/README.md",
+      "pinnedBy": "auto:spec",
+      "note": "Project README",
+      "pinnedAt": 1790011874256,
+      "auto": "spec",
+      "role": "spec"
     }
   ],
   "skills": [],
-  "updatedAt": 1790011720711
+  "updatedAt": 1790011874256
 }
