@@ -1,17 +1,7 @@
 {
   "version": 1,
   "thoughts": [],
-  "pinnedFiles": [
-    {
-      "path": "/home/voldemort/igris/README.md",
-      "pinnedBy": "auto:editor",
-      "note": "Project README",
-      "pinnedAt": 1790007671681,
-      "auto": "spec",
-      "expiresAt": 1790011271681,
-      "role": "spec"
-    }
-  ],
+  "pinnedFiles": [],
   "skills": [],
-  "updatedAt": 1790007671681
+  "updatedAt": 1790011280780
 }
