@@ -10,8 +10,9 @@ function createWindow () {
     width: 1000,
     height: 800,
     webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false
+      nodeIntegration: false,
+      contextIsolation: true,
+      preload: path.join(__dirname, 'preload.js')
     },
     backgroundColor: '#050510',
     titleBarStyle: 'hidden',
@@ -108,3 +109,17 @@ ipcMain.on('voice-mode-active', (event, active) => {
     mainWindow.setAlwaysOnTop(false);
   }
 })
+
+ipcMain.on('open-sandbox-browser', (event, url) => {
+  const sandboxWin = new BrowserWindow({
+    width: 1200,
+    height: 800,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
+      partition: 'sandbox_temp_' + Date.now()
+    }
+  });
+  sandboxWin.loadURL(url);
+});

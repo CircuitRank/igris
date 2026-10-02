@@ -9,7 +9,7 @@
   "author": "",
   "license": "ISC",
   "devDependencies": {
-    "electron": "^30.5.1"
+    "electron": "^44.5.1"
   },
   "allowScripts": {
     "electron": true

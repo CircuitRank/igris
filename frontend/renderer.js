@@ -1,4 +1,4 @@
-const { ipcRenderer } = require('electron');
+// IPC is exposed via preload.js as window.electronAPI
 
 // ============================================================
 // DOM Elements
@@ -29,6 +29,7 @@ const modeLabel = document.getElementById('mode-label');
 // ============================================================
 let ws = null;
 let currentStreamContentSpan = null;
+let lastPingSent = 0;
 
 // Voice state machine: INACTIVE | LISTENING | PROCESSING | SPEAKING
 let voiceState = 'INACTIVE';
@@ -53,6 +54,7 @@ let recordingStartTime = 0; // Track when recording started
 // Audio visualizer for TTS playback
 let audioCtx = null;
 let analyser = null;
+let currentSource = null;
 
 // Push-to-talk state
 let pttActive = false;
@@ -62,7 +64,7 @@ let pttActive = false;
 // ============================================================
 miniModeBtn.addEventListener('click', () => {
     const isMini = document.body.classList.toggle('mini-mode');
-    ipcRenderer.send('toggle-mini-mode', isMini);
+    window.electronAPI.toggleMiniMode(isMini);
     miniModeBtn.textContent = isMini ? 'MAX' : 'MINI';
 });
 
@@ -74,11 +76,15 @@ function initVisualizer(audioElement) {
         audioCtx = new (window.AudioContext || window.webkitAudioContext)();
         analyser = audioCtx.createAnalyser();
         analyser.fftSize = 256;
+        analyser.connect(audioCtx.destination);
     }
     try {
-        const source = audioCtx.createMediaElementSource(audioElement);
-        source.connect(analyser);
-        analyser.connect(audioCtx.destination);
+        if (currentSource) {
+            currentSource.disconnect();
+            currentSource = null;
+        }
+        currentSource = audioCtx.createMediaElementSource(audioElement);
+        currentSource.connect(analyser);
     } catch (e) {
         // Source might already be created for this element
     }
@@ -501,9 +507,11 @@ function connectWebSocket() {
         setAssistantState('idle', 'Awaiting Input...');
 
         setInterval(() => {
-            const randomPing = Math.floor(Math.random() * 15) + 5;
-            pingMetric.textContent = `PING: ${randomPing}ms`;
-        }, 3000);
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                lastPingSent = performance.now();
+                ws.send(JSON.stringify({ type: 'ping' }));
+            }
+        }, 5000);
     };
 
     ws.onmessage = (event) => {
@@ -512,6 +520,9 @@ function connectWebSocket() {
 
             if (data.type === 'status') {
                 setAssistantState('thinking', data.content);
+            } else if (data.type === 'pong') {
+                const latency = Math.round(performance.now() - lastPingSent);
+                pingMetric.textContent = `PING: ${latency}ms`;
             } else if (data.type === 'response') {
                 setAssistantState('idle', 'Awaiting Input...');
                 appendMessage('IGRIS', data.content, 'igris-msg');
@@ -563,6 +574,8 @@ function connectWebSocket() {
             } else if (data.type === 'speaking_end') {
                 // Audio may still be queued/playing — the actual transition
                 // back to LISTENING happens when playNextAudio() exhausts the queue
+            } else if (data.type === 'open_sandbox_browser') {
+                window.electronAPI.openSandboxBrowser(data.url);
             } else if (data.type === 'interrupted') {
                 if (voiceState !== 'INACTIVE') {
                     setVoiceState('LISTENING');

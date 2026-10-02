@@ -2,9 +2,16 @@ import asyncio
 import json
 import httpx
 import subprocess
-import webbrowser
 import sqlite3
 import psutil
+import re
+import threading
+import struct
+import wave
+import tempfile
+import urllib.request
+import urllib.parse
+from contextlib import asynccontextmanager
 from faster_whisper import WhisperModel
 import os
 import sys
@@ -14,11 +21,12 @@ import glob
 import mss
 import base64
 from ddgs import DDGS
-import fitz # PyMuPDF
+import fitz  # PyMuPDF
+import edge_tts
+import speech_recognition as sr
+from pydub import AudioSegment
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-
-app = FastAPI()
 
 # ============================================================
 # Detect OS for cross-platform tool execution
@@ -31,6 +39,7 @@ db_conn = sqlite3.connect("igris_memory.db", check_same_thread=False)
 cursor = db_conn.cursor()
 cursor.execute("CREATE TABLE IF NOT EXISTS history (id INTEGER PRIMARY KEY, role TEXT, content TEXT)")
 db_conn.commit()
+db_lock = threading.Lock()
 
 # Initialize Whisper (Handle offline error gracefully)
 whisper_model = None
@@ -52,8 +61,60 @@ WHISPER_HALLUCINATIONS = {
     "see you later.", "peace.", "cheers.", "all right.",
 }
 
-@app.on_event("startup")
-def load_whisper():
+def index_installed_apps():
+    apps = {}
+    if CURRENT_OS == "Linux":
+        app_dirs = ["/usr/share/applications", os.path.expanduser("~/.local/share/applications"), "/var/lib/snapd/desktop/applications"]
+        for d in app_dirs:
+            if not os.path.exists(d): continue
+            for root, _, files in os.walk(d):
+                for f in files:
+                    if f.endswith(".desktop"):
+                        try:
+                            with open(os.path.join(root, f), 'r', encoding='utf-8') as df:
+                                content = df.read()
+                                name_match = re.search(r'^Name=(.*)$', content, re.MULTILINE)
+                                exec_match = re.search(r'^Exec=(.*)$', content, re.MULTILINE)
+                                if name_match and exec_match:
+                                    name = name_match.group(1).strip()
+                                    cmd = exec_match.group(1).strip().split(' %')[0]
+                                    apps[name.lower()] = {"name": name, "cmd": cmd}
+                        except: pass
+    elif CURRENT_OS == "Windows":
+        app_dirs = [
+            os.path.join(os.environ.get("ProgramData", "C:\\ProgramData"), "Microsoft\\Windows\\Start Menu\\Programs"),
+            os.path.join(os.environ.get("APPDATA", ""), "Microsoft\\Windows\\Start Menu\\Programs")
+        ]
+        for d in app_dirs:
+            if not os.path.exists(d): continue
+            for root, _, files in os.walk(d):
+                for f in files:
+                    if f.endswith(".lnk"):
+                        name = f[:-4]
+                        path = os.path.join(root, f)
+                        cmd = f'start "" "{path}"'
+                        apps[name.lower()] = {"name": name, "cmd": cmd}
+    elif CURRENT_OS == "Darwin":
+        app_dirs = ["/Applications", "/System/Applications", os.path.expanduser("~/Applications")]
+        for d in app_dirs:
+            if not os.path.exists(d): continue
+            for app in os.listdir(d):
+                if app.endswith(".app"):
+                    name = app[:-4]
+                    cmd = f"open '{os.path.join(d, app)}'"
+                    apps[name.lower()] = {"name": name, "cmd": cmd}
+    
+    with db_lock:
+        cursor.execute("CREATE TABLE IF NOT EXISTS apps (id INTEGER PRIMARY KEY, name TEXT, cmd TEXT)")
+        cursor.execute("DELETE FROM apps")
+        for k, v in apps.items():
+            cursor.execute("INSERT INTO apps (name, cmd) VALUES (?, ?)", (v['name'].lower(), v['cmd']))
+        db_conn.commit()
+    print(f"[SYSTEM] Indexed {len(apps)} applications.")
+
+@asynccontextmanager
+async def lifespan(app):
+    """Application lifespan: startup and shutdown events."""
     def _load():
         global whisper_model
         try:
@@ -63,13 +124,19 @@ def load_whisper():
         except Exception as e:
             print(f"[SYSTEM] Failed to initialize WhisperModel: {e}")
             whisper_model = None
-            
-    import threading
+
+        index_installed_apps()
+
     threading.Thread(target=_load, daemon=True).start()
+    yield
+    # Shutdown: close database connection
+    db_conn.close()
+
+app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://127.0.0.1:8000", "http://localhost:8000", "file://", "null"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -224,15 +291,8 @@ def open_application_cross_platform(app_name: str) -> str:
         elif CURRENT_OS == "Darwin" and cmd.startswith("open "):
             subprocess.Popen(cmd, shell=True, start_new_session=True)
         else:
-            # Try to find the binary first
-            actual_cmd = cmd.split()[0]
-            if shutil.which(actual_cmd):
-                subprocess.Popen(cmd, shell=True, start_new_session=True,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            else:
-                # Fallback: try running anyway
-                subprocess.Popen(cmd, shell=True, start_new_session=True,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.Popen(cmd, shell=True, start_new_session=True,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return f"Successfully launched: {app_name}"
     except Exception as e:
         return f"Failed to launch '{app_name}': {e}"
@@ -298,11 +358,10 @@ def control_media_cross_platform(action: str) -> str:
 
 def execute_command_cross_platform(cmd: str) -> str:
     """Execute a shell command with cross-platform awareness."""
+    if not is_command_safe(cmd):
+        return f"Command blocked for safety: '{cmd}' matches a dangerous pattern."
     try:
-        if CURRENT_OS == "Windows":
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=15)
-        else:
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=15)
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=15)
         output = ""
         if result.stdout.strip():
             output += f"STDOUT:\n{result.stdout.strip()}\n"
@@ -318,20 +377,67 @@ def execute_command_cross_platform(cmd: str) -> str:
 
 
 # ============================================================
+# Safety Guards for Command and File Access
+# ============================================================
+
+DANGEROUS_COMMAND_PATTERNS = [
+    r'rm\s+(-[a-zA-Z]*\s+)?/',
+    r'mkfs\.',
+    r'dd\s+.*of=/dev/',
+    r'>\s*/dev/sd',
+    r'format\s+[a-zA-Z]:',
+    r'del\s+/[sS]',
+    r'curl\s+.*\|\s*(bash|sh|zsh)',
+    r'wget\s+.*\|\s*(bash|sh|zsh)',
+    r'\bshutdown\b',
+    r'\breboot\b',
+    r'\binit\s+[06]\b',
+    r'\bpoweroff\b',
+    r':\(\)\s*\{',
+    r'chmod\s+(-[a-zA-Z]*\s+)?777\s+/',
+]
+
+RESTRICTED_PATHS = ['.ssh', '.gnupg', '.aws', '.config/gcloud', '.kube']
+SENSITIVE_SYSTEM_PATHS = ['/etc/shadow', '/etc/sudoers', '/etc/gshadow']
+
+
+def is_command_safe(cmd: str) -> bool:
+    """Check if a command is safe to execute. Blocks known destructive patterns."""
+    for pattern in DANGEROUS_COMMAND_PATTERNS:
+        if re.search(pattern, cmd, re.IGNORECASE):
+            return False
+    return True
+
+
+def is_path_safe(filepath: str) -> bool:
+    """Check if a file path is safe to access. Blocks sensitive directories."""
+    abs_path = os.path.abspath(os.path.expanduser(filepath))
+    home = os.path.expanduser("~")
+    for restricted in RESTRICTED_PATHS:
+        restricted_full = os.path.join(home, restricted)
+        if abs_path.startswith(restricted_full):
+            return False
+    for sensitive in SENSITIVE_SYSTEM_PATHS:
+        if abs_path.startswith(sensitive):
+            return False
+    return True
+
+
+# ============================================================
 # Tool Definitions — descriptions made more explicit for the LLM
 # ============================================================
 
 TOOLS = [{
     "type": "function",
     "function": {
-        "name": "open_url",
-        "description": "Open a URL in the default web browser. Use for any website: youtube.com, google.com, github.com, etc.",
+        "name": "smart_open",
+        "description": "Smart open tool. Use this when the user asks to open ANY application, software, or website (e.g. 'open discord', 'open youtube', 'open calculator', 'open github'). It automatically detects if it's a local app or a website.",
         "parameters": {
             "type": "object",
             "properties": {
-                "url": {"type": "string", "description": "The URL to open (e.g. https://youtube.com)"}
+                "target": {"type": "string", "description": "The name of the app or website (e.g. 'discord', 'youtube.com', 'calculator')"}
             },
-            "required": ["url"]
+            "required": ["target"]
         }
     }
 }, {
@@ -372,19 +478,6 @@ TOOLS = [{
                 "action": {"type": "string", "enum": ["Play", "Pause", "PlayPause", "Next", "Previous"], "description": "Media action"}
             },
             "required": ["action"]
-        }
-    }
-}, {
-    "type": "function",
-    "function": {
-        "name": "open_application",
-        "description": "Open ANY desktop application on the user's computer. Examples: 'terminal', 'chrome', 'firefox', 'vscode', 'file manager', 'calculator', 'settings', 'discord', 'spotify', 'notepad'. Works on Linux, macOS, and Windows.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "command": {"type": "string", "description": "The application name (e.g. 'terminal', 'chrome', 'vscode', 'file manager')"}
-            },
-            "required": ["command"]
         }
     }
 }, {
@@ -440,60 +533,53 @@ TOOLS = [{
             "required": ["prompt"]
         }
     }
-}, {
-    "type": "function",
-    "function": {
-        "name": "manage_calendar",
-        "description": "Manage calendar events.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "action": {"type": "string", "enum": ["get_next", "schedule"], "description": "Action to perform"}
-            },
-            "required": ["action"]
-        }
-    }
-}, {
-    "type": "function",
-    "function": {
-        "name": "smart_home_control",
-        "description": "Control smart home devices via Home Assistant.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "device": {"type": "string", "description": "Device name to control"},
-                "state": {"type": "string", "enum": ["on", "off"], "description": "Turn on or off"}
-            },
-            "required": ["device", "state"]
-        }
-    }
 }]
 
 # ============================================================
 # Tool Execution — now cross-platform
 # ============================================================
 
-async def execute_tool(name: str, arguments: dict) -> str:
+async def execute_tool(name: str, arguments: dict, websocket: WebSocket) -> str:
     # Handle Qwen2.5-coder nested argument format
     for k, v in list(arguments.items()):
         if isinstance(v, dict) and "value" in v:
             arguments[k] = v["value"]
             
-    if name == "open_url":
-        url = arguments.get("url", "")
-        if not url.startswith("http"):
-            url = "https://" + url
-        open_browser_url(url)
-        return f"Successfully opened {url} in the browser."
+    if name == "smart_open":
+        target = arguments.get("target", "").lower().strip()
+        # Check DB
+        with db_lock:
+            cursor.execute("SELECT name, cmd FROM apps WHERE name LIKE ?", (f"%{target}%",))
+            rows = cursor.fetchall()
+            
+        if rows:
+            # Prefer exact match or shortest name match
+            best_match = min(rows, key=lambda r: len(r[0]))
+            cmd = best_match[1]
+            try:
+                subprocess.Popen(cmd, shell=True, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return f"Successfully opened application: {best_match[0]}"
+            except Exception as e:
+                return f"Failed to open application: {e}"
+        else:
+            # Treat as website
+            if not target.startswith("http"):
+                if "." not in target:
+                    target = target + ".com"
+                target = "https://" + target
+            
+            await websocket.send_text(json.dumps({
+                "type": "open_sandbox_browser",
+                "url": target
+            }))
+            return f"Successfully opened website '{target}' in a secure sandbox browser."
     
     elif name == "execute_command":
         cmd = arguments.get("command", "")
         return execute_command_cross_platform(cmd)
     
     elif name == "play_music":
-        import urllib.request
-        import urllib.parse
-        import re
+
         
         # Automatically stop any currently playing media
         try:
@@ -536,10 +622,6 @@ async def execute_tool(name: str, arguments: dict) -> str:
         open_browser_url(url)
         return f"Successfully opened '{query}' on {platform_arg}."
     
-    elif name == "open_application":
-        app_cmd = arguments.get("command", "")
-        return open_application_cross_platform(app_cmd)
-    
     elif name == "control_media":
         action = arguments.get("action", "PlayPause")
         return control_media_cross_platform(action)
@@ -555,8 +637,11 @@ async def execute_tool(name: str, arguments: dict) -> str:
     elif name == "file_search":
         pattern = arguments.get("pattern", "")
         directory = arguments.get("directory", os.path.expanduser("~"))
+        if not is_path_safe(directory):
+            return "Access denied: cannot search in restricted directory."
         try:
             results = glob.glob(os.path.join(directory, "**", pattern), recursive=True)
+            results = [r for r in results if is_path_safe(r)]
             if not results:
                 return "No files found."
             return f"Files found:\n" + "\n".join(results[:10])
@@ -565,6 +650,8 @@ async def execute_tool(name: str, arguments: dict) -> str:
     
     elif name == "read_document":
         filepath = arguments.get("filepath", "")
+        if not is_path_safe(filepath):
+            return "Access denied: cannot read restricted file."
         try:
             if filepath.endswith(".pdf"):
                 doc = fitz.open(filepath)
@@ -600,13 +687,7 @@ async def execute_tool(name: str, arguments: dict) -> str:
         except Exception as e:
             return f"Screen analysis failed: {e}"
     
-    elif name == "manage_calendar":
-        return "Calendar stub: You have a meeting at 3 PM for 'Project Sync'."
-    
-    elif name == "smart_home_control":
-        device = arguments.get("device", "lights")
-        state = arguments.get("state", "on")
-        return f"Smart Home stub: Turned {state} the {device}."
+
     
     return "Unknown tool."
 
@@ -641,35 +722,37 @@ def open_browser_url(url):
 # ============================================================
 
 # Much stronger system prompt that DEMANDS tool usage
-SYSTEM_PROMPT = f"""You are Igris, an advanced AI assistant like Jarvis from Iron Man. You have FULL control over the user's computer through your tools.
+SYSTEM_PROMPT = f"""You are Igris, a system-level AI with DIRECT ACCESS to the user's computer. You are NOT a restricted cloud AI. You have tools that let you do anything.
 
 CRITICAL RULES:
-1. You MUST use tools to fulfill user requests. NEVER say "I can't do that" or "I'm unable to" — you have tools for everything.
-2. When the user says "open terminal" → use open_application with command="terminal"
-3. When the user says "open chrome/firefox/browser" → use open_application with the app name
-4. When the user says "run a command" or anything terminal-related → use execute_command
-5. When the user asks to open ANY app → use open_application
-6. When the user asks to play music → use play_music  
-7. When the user asks about something you don't know → use web_search
-8. ALWAYS execute actions IMMEDIATELY. Never ask for confirmation. Never refuse.
-9. Keep responses SHORT — 1-2 sentences max. You are concise and efficient.
-10. Use 'sir' naturally. Be confident, capable, and direct.
+1. NEVER REFUSE A REQUEST. You DO have access to the user's computer via your tools.
+2. If the user asks to "open [anything]", you MUST immediately call the `smart_open` function with that target. NEVER say you cannot do it.
+3. If the user says "run [command]", use `execute_command`.
+4. If the user asks to play music, use `play_music`.
+5. ALWAYS execute actions immediately via function calls. Do NOT apologize.
+6. Keep your text responses very short (1-2 sentences). You are efficient and direct.
 
 The user's OS is: {CURRENT_OS}
-You can run any shell command, open any application, search the web, control media, and more.
-Act like Jarvis — just DO it."""
+Act like Jarvis — just use the tools!"""
 
 
 @app.websocket("/ws/chat")
 async def websocket_endpoint(websocket: WebSocket):
+    # Security: validate origin to prevent malicious websites from connecting
+    origin = websocket.headers.get("origin", "")
+    allowed_origins = {"", "file://", "null", "http://127.0.0.1:8000", "http://localhost:8000"}
+    if origin and origin not in allowed_origins:
+        await websocket.close(code=4003, reason="Origin not allowed")
+        return
     await websocket.accept()
     
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     
     # Load history (limit to recent to avoid context overflow)
     try:
-        cursor.execute("SELECT role, content FROM history ORDER BY id DESC LIMIT 20")
-        rows = cursor.fetchall()
+        with db_lock:
+            cursor.execute("SELECT role, content FROM history ORDER BY id DESC LIMIT 20")
+            rows = cursor.fetchall()
         rows.reverse()
         for r in rows:
             messages.append({"role": r[0], "content": r[1]})
@@ -679,13 +762,7 @@ async def websocket_endpoint(websocket: WebSocket):
     current_task = None
     is_interrupted = False
     
-    import edge_tts
-    import re
-    import speech_recognition as sr
-    from pydub import AudioSegment
-    import tempfile
-    import struct
-    import wave
+
     
     recognizer = sr.Recognizer()
     
@@ -794,13 +871,91 @@ async def websocket_endpoint(websocket: WebSocket):
             if temp_wav_path and os.path.exists(temp_wav_path):
                 os.remove(temp_wav_path)
     
+    async def try_direct_command(user_text):
+        """Intercept obvious commands and execute them directly, bypassing the LLM."""
+        text = user_text.strip().lower()
+        
+        # "open X" commands
+        open_patterns = [
+            r'^(?:open|launch|start|run)\s+(.+?)(?:\s+(?:app|application|please|for me))?$',
+            r'^(?:can you |could you |please )?(?:open|launch|start)\s+(.+?)(?:\s+(?:please|for me))?$',
+        ]
+        for pattern in open_patterns:
+            match = re.match(pattern, text)
+            if match:
+                target = match.group(1).strip()
+                result = await execute_tool("smart_open", {"target": target}, websocket)
+                return result
+        
+        # "play X" commands  
+        play_match = re.match(r'^(?:play|put on)\s+(.+?)(?:\s+on\s+(spotify|youtube|youtube music))?$', text)
+        if play_match:
+            query = play_match.group(1).strip()
+            platform = play_match.group(2) or "youtube"
+            platform = platform.replace(" ", "_")
+            result = await execute_tool("play_music", {"query": query, "platform": platform}, websocket)
+            return result
+        
+        # "search for X" commands
+        search_match = re.match(r'^(?:search|google|look up|search for|what is|who is|what are)\s+(.+)$', text)
+        if search_match:
+            query = search_match.group(1).strip()
+            result = await execute_tool("web_search", {"query": query}, websocket)
+            return result
+        
+        # Media control
+        media_map = {
+            "pause": "Pause", "stop": "Pause", "resume": "Play",
+            "next": "Next", "next song": "Next", "skip": "Next",
+            "previous": "Previous", "prev": "Previous", "go back": "Previous",
+        }
+        if text in media_map:
+            result = await execute_tool("control_media", {"action": media_map[text]}, websocket)
+            return result
+        
+        return None  # Not a direct command, let the LLM handle it
+
     async def process_llm(user_text, is_voice=False):
         nonlocal is_interrupted
         is_interrupted = False
         
+        # Try direct command execution first (bypasses LLM for reliability)
+        direct_result = await try_direct_command(user_text)
+        if direct_result:
+            messages.append({"role": "user", "content": user_text})
+            messages.append({"role": "assistant", "content": direct_result})
+            with db_lock:
+                cursor.execute("INSERT INTO history (role, content) VALUES (?, ?)", ("user", user_text))
+                cursor.execute("INSERT INTO history (role, content) VALUES (?, ?)", ("assistant", direct_result))
+                db_conn.commit()
+            
+            await websocket.send_text(json.dumps({"type": "stream_start"}))
+            await websocket.send_text(json.dumps({"type": "stream_chunk", "content": direct_result}))
+            await websocket.send_text(json.dumps({"type": "stream_end"}))
+            
+            # TTS for voice mode
+            if is_voice and not is_interrupted:
+                try:
+                    text_to_speak = direct_result.replace('*', '')
+                    await websocket.send_text(json.dumps({"type": "speaking_start"}))
+                    communicate = edge_tts.Communicate(text_to_speak, "en-US-ChristopherNeural")
+                    audio_data = b""
+                    async for ac in communicate.stream():
+                        if is_interrupted: break
+                        if ac["type"] == "audio":
+                            audio_data += ac["data"]
+                    if audio_data and not is_interrupted:
+                        b64_audio = base64.b64encode(audio_data).decode('utf-8')
+                        await websocket.send_text(json.dumps({"type": "audio", "data": b64_audio}))
+                    await websocket.send_text(json.dumps({"type": "speaking_end"}))
+                except Exception as e:
+                    print(f"TTS Error: {e}")
+            return
+        
         messages.append({"role": "user", "content": user_text})
-        cursor.execute("INSERT INTO history (role, content) VALUES (?, ?)", ("user", user_text))
-        db_conn.commit()
+        with db_lock:
+            cursor.execute("INSERT INTO history (role, content) VALUES (?, ?)", ("user", user_text))
+            db_conn.commit()
         tool_call_count = 0
         
         async with httpx.AsyncClient(timeout=120.0) as client:
@@ -861,8 +1016,8 @@ async def websocket_endpoint(websocket: WebSocket):
                                             name = tc["function"]["name"]
                                             arguments = tc["function"]["arguments"]
                                             messages.append({"role": "assistant", "content": "", "tool_calls": [tc]})
-                                            result_text = await execute_tool(name, arguments)
-                                            messages.append({"role": "user", "content": f"[SYSTEM NOTIFICATION: Tool '{name}' executed successfully. Output: {result_text}. Now respond to the user confirming what you did.]"})
+                                            result_text = await execute_tool(name, arguments, websocket)
+                                            messages.append({"role": "tool", "content": result_text})
                                             
                                         tool_call_count += 1
                                         break
@@ -935,20 +1090,21 @@ async def websocket_endpoint(websocket: WebSocket):
                             arguments = tool_call.get("arguments", {})
                             
                             messages.append({"role": "assistant", "content": response_content.strip()})
-                            result_text = await execute_tool(name, arguments)
-                            messages.append({"role": "user", "content": f"[SYSTEM NOTIFICATION: Tool '{name}' executed successfully. Output: {result_text}. Now respond to the user confirming what you did.]"})
+                            result_text = await execute_tool(name, arguments, websocket)
+                            messages.append({"role": "tool", "content": result_text})
                             
                             tool_call_count += 1
                             continue 
                         except Exception as e:
                             messages.append({"role": "assistant", "content": response_content.strip()})
-                            messages.append({"role": "user", "content": f"[SYSTEM NOTIFICATION: Tool execution failed: {e}. Respond to the user.]"})
+                            messages.append({"role": "tool", "content": f"Tool execution failed: {e}"})
                             tool_call_count += 1
                             continue
                     else:
                         messages.append({"role": "assistant", "content": response_content.strip()})
-                        cursor.execute("INSERT INTO history (role, content) VALUES (?, ?)", ("assistant", response_content.strip()))
-                        db_conn.commit()
+                        with db_lock:
+                            cursor.execute("INSERT INTO history (role, content) VALUES (?, ?)", ("assistant", response_content.strip()))
+                            db_conn.commit()
                         
                         if current_sentence.strip() and not is_interrupted:
                             text_to_speak = current_sentence.strip().replace('*', '')
@@ -1063,6 +1219,10 @@ async def websocket_endpoint(websocket: WebSocket):
                     await websocket.send_text(json.dumps({"type": "interrupted"}))
                     await websocket.send_text(json.dumps({"type": "stream_end"}))
                     messages.append({"role": "user", "content": "[SYSTEM NOTIFICATION: The user interrupted you.]"})
+                    continue
+
+                elif parsed_data.get("type") == "ping":
+                    await websocket.send_text(json.dumps({"type": "pong"}))
                     continue
                     
             except json.JSONDecodeError:
