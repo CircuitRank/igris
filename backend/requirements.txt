@@ -11,3 +11,6 @@ PyMuPDF
 pillow
 mss
 psutil
+deepfilternet
+torch
+torchaudio

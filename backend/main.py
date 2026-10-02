@@ -25,6 +25,9 @@ import fitz  # PyMuPDF
 import edge_tts
 import speech_recognition as sr
 from pydub import AudioSegment
+import torch
+import torchaudio
+import df_compat  # Patch torchaudio for DeepFilterNet compatibility (must be before df imports)
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -43,6 +46,10 @@ db_lock = threading.Lock()
 
 # Initialize Whisper (Handle offline error gracefully)
 whisper_model = None
+
+# Initialize DeepFilterNet for noise suppression
+df_model = None
+df_state = None
 
 # Known Whisper hallucinations on silence/noise — these get generated from ambient audio
 WHISPER_HALLUCINATIONS = {
@@ -116,11 +123,42 @@ def index_installed_apps():
 async def lifespan(app):
     """Application lifespan: startup and shutdown events."""
     def _load():
-        global whisper_model
+        global whisper_model, df_model, df_state
+        def is_model_cached(model_name):
+            """Check if a faster-whisper model is already downloaded."""
+            cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hub")
+            repo_dir = os.path.join(cache_dir, f"models--Systran--faster-whisper-{model_name}")
+            return os.path.exists(repo_dir)
+
+        # Load DeepFilterNet for noise suppression
+        try:
+            print("[SYSTEM] Loading DeepFilterNet model...")
+            from df.enhance import init_df
+            df_model, df_state, _ = init_df()
+            print(f"[SYSTEM] ✓ DeepFilterNet loaded (sample rate: {df_state.sr()}Hz)")
+        except Exception as e:
+            print(f"[SYSTEM] DeepFilterNet failed to load: {e}")
+            print("[SYSTEM] Audio denoising will be disabled.")
+            df_model = None
+            df_state = None
+
         try:
             print("[SYSTEM] Loading Whisper model in background...")
-            whisper_model = WhisperModel("small.en", device="cpu", compute_type="int8")
-            print("[SYSTEM] Whisper model loaded successfully.")
+            # Try models in order of quality — only use already-cached models
+            for model_name in ["large-v3", "medium.en", "small.en"]:
+                if not is_model_cached(model_name):
+                    print(f"[SYSTEM] Model '{model_name}' not cached, skipping...")
+                    continue
+                try:
+                    whisper_model = WhisperModel(model_name, device="cpu", compute_type="int8")
+                    print(f"[SYSTEM] ✓ Whisper model '{model_name}' loaded successfully.")
+                    break
+                except Exception as e:
+                    print(f"[SYSTEM] Model '{model_name}' failed to load: {e}")
+                    continue
+            else:
+                print("[SYSTEM] No Whisper model cached! Voice will use Google fallback.")
+                whisper_model = None
         except Exception as e:
             print(f"[SYSTEM] Failed to initialize WhisperModel: {e}")
             whisper_model = None
@@ -766,7 +804,7 @@ async def websocket_endpoint(websocket: WebSocket):
     
     recognizer = sr.Recognizer()
     
-    def check_audio_energy(wav_path, threshold=100):
+    def check_audio_energy(wav_path, threshold=60):
         """Check if a WAV file contains actual speech energy (not just noise)."""
         try:
             with wave.open(wav_path, 'rb') as wf:
@@ -830,6 +868,37 @@ async def websocket_endpoint(websocket: WebSocket):
             
             # Convert webm to wav using pydub (requires ffmpeg)
             audio = AudioSegment.from_file(temp_webm_path, format="webm")
+            
+            # DeepFilterNet noise suppression — runs at 48kHz
+            if df_model is not None and df_state is not None:
+                try:
+                    from df.enhance import enhance
+                    import numpy as np
+                    # Convert pydub audio to 48kHz mono for DeepFilterNet
+                    audio_48k = audio.set_frame_rate(48000).set_channels(1)
+                    
+                    # pydub AudioSegment → numpy float32 → torch tensor [1, T]
+                    samples = np.array(audio_48k.get_array_of_samples(), dtype=np.float32)
+                    samples /= 32768.0  # int16 → float32 normalized to [-1, 1]
+                    noisy_tensor = torch.from_numpy(samples).unsqueeze(0)  # [1, T]
+                    
+                    # Denoise
+                    enhanced_tensor = enhance(df_model, df_state, noisy_tensor)
+                    
+                    # torch tensor → numpy int16 → pydub AudioSegment
+                    enhanced_np = (enhanced_tensor.squeeze(0).numpy() * 32768.0).clip(-32768, 32767).astype(np.int16)
+                    audio = AudioSegment(
+                        data=enhanced_np.tobytes(),
+                        sample_width=2,  # 16-bit
+                        frame_rate=48000,
+                        channels=1,
+                    )
+                    print("[DENOISE] ✓ Audio denoised with DeepFilterNet")
+                except Exception as e:
+                    print(f"[DENOISE] DeepFilterNet processing failed, using raw audio: {e}")
+            
+            # Resample to 16kHz mono — Whisper's native sample rate for best accuracy
+            audio = audio.set_frame_rate(16000).set_channels(1)
             audio.export(temp_wav_path, format="wav")
             
             # Check audio energy — reject if it's just noise
@@ -840,20 +909,30 @@ async def websocket_endpoint(websocket: WebSocket):
             if whisper_model is not None:
                 segments, info = whisper_model.transcribe(
                     temp_wav_path,
-                    vad_filter=True,  # Enable Silero VAD filter to skip silence
+                    language="en",  # Force English — prevents misdetection on short clips
+                    beam_size=5,
+                    best_of=3,
+                    vad_filter=True,
                     vad_parameters=dict(
-                        min_silence_duration_ms=500,
-                        speech_pad_ms=300,
+                        min_silence_duration_ms=300,
+                        speech_pad_ms=200,
                     )
                 )
                 transcribed_text = " ".join([segment.text for segment in segments]).strip()
             else:
+                print("[STT] Whisper model still loading, using Google fallback...")
                 try:
                     with sr.AudioFile(temp_wav_path) as source:
                         audio_data = recognizer.record(source)
                         transcribed_text = recognizer.recognize_google(audio_data)
+                except sr.UnknownValueError:
+                    print("[STT] Google could not understand the audio")
+                    transcribed_text = None
+                except sr.RequestError as e:
+                    print(f"[STT] Google API request failed: {e}")
+                    transcribed_text = None
                 except Exception as e:
-                    print(f"[VAD] Google fallback failed: {e}")
+                    print(f"[STT] Google fallback error: {e}")
                     transcribed_text = None
             
             if not transcribed_text:
@@ -866,14 +945,36 @@ async def websocket_endpoint(websocket: WebSocket):
             return transcribed_text
             
         finally:
-            if temp_webm_path and os.path.exists(temp_webm_path):
-                os.remove(temp_webm_path)
-            if temp_wav_path and os.path.exists(temp_wav_path):
-                os.remove(temp_wav_path)
+            for p in [temp_webm_path, temp_wav_path]:
+                if p and os.path.exists(p):
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
     
     async def try_direct_command(user_text):
         """Intercept obvious commands and execute them directly, bypassing the LLM."""
-        text = user_text.strip().lower()
+        # Strip punctuation and normalize — Whisper often adds periods, commas, etc.
+        text = re.sub(r'[.,!?;:"\']', '', user_text).strip().lower()
+        
+        # Strip wakewords and their common mistranscriptions first so they don't block the command
+        wakewords = r'^(hey |hi |hello |yo )?(igris|grinch|iris|aegis|egris|igress|tigris)\b\s*,?\s*'
+        text = re.sub(wakewords, '', text).strip()
+        
+        # Strip filler words Whisper sometimes adds
+        text = re.sub(r'^(hey |okay |so |um |uh |well |please )+', '', text).strip()
+
+        # Fix common Whisper mistranscriptions (now that filler/wakewords are stripped)
+        whisper_fixes = {
+            r'^on\b': 'open',          # "on YouTube" → "open YouTube"
+            r'^upon\b': 'open',        # "upon chrome" → "open chrome"  
+            r'^oh pen\b': 'open',      # "oh pen" → "open"
+            r'^than\b': 'open',        # "than YouTube" → "open YouTube"
+            r'^lunch\b': 'launch',     # "lunch discord" → "launch discord"
+            r'^place\b': 'play',       # "place music" → "play music"
+        }
+        for pattern, replacement in whisper_fixes.items():
+            text = re.sub(pattern, replacement, text)
         
         # "open X" commands
         open_patterns = [
@@ -1198,6 +1299,10 @@ async def websocket_endpoint(websocket: WebSocket):
                                 await current_task
                             except (asyncio.CancelledError, Exception):
                                 pass
+                            # Notify frontend so it exits SPEAKING state
+                            await websocket.send_text(json.dumps({"type": "interrupted"}))
+                            await websocket.send_text(json.dumps({"type": "speaking_end"}))
+                            await websocket.send_text(json.dumps({"type": "stream_end"}))
                         
                         current_task = asyncio.create_task(process_llm(transcribed_text, is_voice=True))
                         

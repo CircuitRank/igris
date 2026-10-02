@@ -192,7 +192,15 @@ voiceCloseBtn.addEventListener('click', () => exitVoiceMode());
 // ============================================================
 async function startMicAndVAD() {
     try {
-        micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        micStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true,
+                sampleRate: 48000,
+                channelCount: 1
+            }
+        });
 
         vadAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
         const vadSource = vadAudioCtx.createMediaStreamSource(micStream);
@@ -252,7 +260,7 @@ function runVADLoop() {
         voiceOrb.style.transform = `scale(${micScale})`;
     }
 
-    const threshold = 30;
+    const threshold = 20;
     if (average > threshold) {
         if (!isSpeaking) {
             isSpeaking = true;
@@ -264,7 +272,7 @@ function runVADLoop() {
                 isSpeaking = false;
                 finishRecordingAndSend();
             }
-        }, 2500); // 2.5 seconds of silence ends the turn
+        }, 1800); // 1.8 seconds of silence ends the turn
     }
 }
 
@@ -319,6 +327,11 @@ function finishRecordingAndSend() {
         reader.onloadend = () => {
             const base64data = reader.result.split(',')[1];
             if (ws && ws.readyState === WebSocket.OPEN) {
+                // If AI is speaking/streaming, interrupt it before sending new input
+                if (isPlayingAudio || voiceState === 'SPEAKING') {
+                    interruptPlayback();
+                    sendInterrupt();
+                }
                 ws.send(JSON.stringify({ type: 'voice_input', data: base64data }));
                 setVoiceState('PROCESSING');
                 voiceOrb.style.transform = 'scale(1)';
@@ -368,6 +381,7 @@ function interruptPlayback() {
         currentAudio = null;
     }
     isPlayingAudio = false;
+    stopInterruptDetection();
     voiceOrb.style.transform = 'scale(1)';
     orb.style.transform = 'scale(1)';
 }
@@ -390,14 +404,35 @@ voiceInterruptBtn.addEventListener('click', () => {
 // Hands-free Interrupt: speak while AI is talking
 // ============================================================
 let interruptAnimationFrameId = null;
+let interruptSpeechStartTime = 0;   // timestamp when sustained speech began
+let interruptDetectionActive = false;
+
+function startInterruptDetection() {
+    if (interruptDetectionActive) return; // already running
+    interruptDetectionActive = true;
+    interruptSpeechStartTime = 0;
+    checkInterruptWhileSpeaking();
+}
+
+function stopInterruptDetection() {
+    interruptDetectionActive = false;
+    interruptSpeechStartTime = 0;
+    if (interruptAnimationFrameId) {
+        cancelAnimationFrame(interruptAnimationFrameId);
+        interruptAnimationFrameId = null;
+    }
+}
 
 function checkInterruptWhileSpeaking() {
-    if (!vadCheckRunning || !vadAnalyser) return;
-    if (voiceState !== 'SPEAKING') return;
-    if (voiceInteractionMode !== 'hands-free') return;
+    if (!interruptDetectionActive) return;
+    if (!vadAnalyser) { interruptDetectionActive = false; return; }
+    if (voiceInteractionMode !== 'hands-free') { interruptDetectionActive = false; return; }
 
-    if (interruptAnimationFrameId) cancelAnimationFrame(interruptAnimationFrameId);
+    // Keep the loop alive as long as audio is playing in voice mode
     interruptAnimationFrameId = requestAnimationFrame(checkInterruptWhileSpeaking);
+
+    // Only trigger an interrupt when the AI is actually speaking
+    if (voiceState !== 'SPEAKING') return;
 
     const bufferLength = vadAnalyser.frequencyBinCount;
     const dataArray = new Uint8Array(bufferLength);
@@ -407,13 +442,34 @@ function checkInterruptWhileSpeaking() {
     for (let i = 0; i < bufferLength; i++) sum += dataArray[i];
     let average = sum / bufferLength;
 
-    // Threshold lowered so user doesn't have to yell to interrupt
-    if (average > 35) {
+    // Higher threshold than normal VAD to cut through speaker bleedthrough.
+    // The TTS audio leaking into the mic typically sits around 25–45;
+    // real speech directly into the mic is usually 50+.
+    const interruptThreshold = 50;
+
+    if (average > interruptThreshold) {
+        if (interruptSpeechStartTime === 0) {
+            interruptSpeechStartTime = Date.now();
+        }
+    } else {
+        // Reset if silence detected — require continuous speech
+        interruptSpeechStartTime = 0;
+    }
+
+    // Require ~250ms of sustained speech above threshold to trigger interrupt.
+    // This prevents false triggers from brief speaker bleedthrough spikes
+    // while still feeling responsive to real user speech.
+    if (interruptSpeechStartTime > 0 && (Date.now() - interruptSpeechStartTime) >= 250) {
+        console.log('[INTERRUPT] User speech detected during TTS — interrupting');
+        interruptSpeechStartTime = 0;
+        stopInterruptDetection();
         interruptPlayback();
         sendInterrupt();
         setVoiceState('LISTENING');
-        // Restart VAD recording loop
-        isSpeaking = false;
+        // Immediately start recording user's speech
+        isSpeaking = true;
+        startRecording();
+        vadCheckRunning = true;
         runVADLoop();
     }
 }
@@ -474,8 +530,8 @@ function playNextAudio() {
         initVisualizer(currentAudio);
         if (voiceState !== 'INACTIVE') {
             animateVoiceOrb();
-            // Start checking for interrupt via voice
-            checkInterruptWhileSpeaking();
+            // Start / keep alive the interrupt detection loop
+            startInterruptDetection();
         } else {
             animateMainOrb();
         }
