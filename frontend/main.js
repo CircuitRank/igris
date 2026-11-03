@@ -1,4 +1,4 @@
-const { app, BrowserWindow, globalShortcut, Tray, Menu, ipcMain, nativeImage, screen } = require('electron')
+const { app, BrowserWindow, globalShortcut, Tray, Menu, ipcMain, nativeImage, screen, shell } = require('electron')
 const path = require('node:path')
 
 let mainWindow = null;
@@ -6,19 +6,24 @@ let tray = null;
 let isMiniMode = false;
 
 function createWindow () {
+  const iconPath = path.join(__dirname, 'icon.png');
   mainWindow = new BrowserWindow({
-    width: 1000,
-    height: 800,
+    width: 1060,
+    height: 820,
+    minWidth: 420,
+    minHeight: 480,
+    icon: iconPath,
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
       preload: path.join(__dirname, 'preload.js')
     },
-    backgroundColor: '#050510',
+    backgroundColor: '#191919',
     titleBarStyle: 'hidden',
     titleBarOverlay: {
-      color: '#050510',
-      symbolColor: '#00f3ff'
+      color: '#202020',
+      symbolColor: '#9c9c9c',
+      height: 44
     }
   })
 
@@ -35,7 +40,14 @@ function createWindow () {
 }
 
 function createTray() {
-  const icon = nativeImage.createEmpty();
+  const iconPath = path.join(__dirname, 'icon.png');
+  let icon = nativeImage.createFromPath(iconPath);
+  if (!icon.isEmpty()) {
+    icon = icon.resize({ width: 16, height: 16 });
+  } else {
+    icon = nativeImage.createEmpty();
+  }
+
   tray = new Tray(icon);
   const contextMenu = Menu.buildFromTemplate([
     { label: 'Show/Hide Igris', click: toggleWindow },
@@ -89,13 +101,13 @@ ipcMain.on('toggle-mini-mode', (event, enable) => {
   isMiniMode = enable;
   if (enable) {
     mainWindow.setAlwaysOnTop(true, 'floating');
-    mainWindow.setSize(350, 400);
+    mainWindow.setSize(380, 520);
     const primaryDisplay = screen.getPrimaryDisplay();
     const { width, height } = primaryDisplay.workAreaSize;
-    mainWindow.setPosition(width - 370, height - 420);
+    mainWindow.setPosition(width - 400, height - 550);
   } else {
     mainWindow.setAlwaysOnTop(false);
-    mainWindow.setSize(1000, 800);
+    mainWindow.setSize(1060, 820);
     mainWindow.center();
   }
 })
@@ -107,6 +119,12 @@ ipcMain.on('voice-mode-active', (event, active) => {
     mainWindow.setAlwaysOnTop(true, 'floating');
   } else {
     mainWindow.setAlwaysOnTop(false);
+  }
+})
+
+ipcMain.on('open-external', (event, url) => {
+  if (typeof url === 'string' && (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('mailto:'))) {
+    shell.openExternal(url);
   }
 })
 

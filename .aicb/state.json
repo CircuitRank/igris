@@ -6,18 +6,18 @@
       "path": "/home/voldemort/igris/README.md",
       "pinnedBy": "auto:spec",
       "note": "Project README",
-      "pinnedAt": 1790939994274,
+      "pinnedAt": 1793721741421,
       "auto": "spec",
       "role": "spec"
     },
     {
-      "path": "/home/voldemort/igris/frontend/renderer.js",
+      "path": "/home/voldemort/igris/backend/gemini_service.py",
       "pinnedBy": "auto:editor",
-      "pinnedAt": 1790938245858,
-      "auto": "dwell",
-      "expiresAt": 1790941845858
+      "pinnedAt": 1793725960478,
+      "auto": "recent-edit",
+      "expiresAt": 1793729560478
     }
   ],
   "skills": [],
-  "updatedAt": 1790939994274
+  "updatedAt": 1793725960478
 }

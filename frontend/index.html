@@ -3,126 +3,439 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>IGRIS | AI System</title>
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' data: blob:; connect-src 'self' http://127.0.0.1:8000 ws://127.0.0.1:8000;">
+    <title>Igris</title>
     <link rel="stylesheet" href="style.css">
-    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;700;900&family=Rajdhani:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 </head>
 <body>
-    <div class="background-grid"></div>
-    
-    <!-- Top Bar -->
-    <header class="top-bar glass-panel">
-        <div class="system-status">
-            <span class="status-indicator"></span>
-            <span class="status-text">SYSTEM ONLINE</span>
-        </div>
-        <div class="system-title">IGRIS <span class="version">v2.0.0</span></div>
-        <div class="system-metrics">
-            <span id="ping-metric">PING: 0ms</span>
-            <button id="mini-mode-btn" class="cyber-button" style="padding: 2px 5px; font-size: 0.7rem; margin-left: 10px;">MINI</button>
-        </div>
-    </header>
+<div class="app" id="app">
 
-    <!-- Main Container -->
-    <main class="main-container">
-        
-        <!-- Left Panel: Assistant Visualizer -->
-        <section class="visualizer-panel glass-panel">
-            <div class="orb-container">
-                <div class="orb" id="igris-orb">
-                    <div class="orb-core"></div>
-                    <div class="orb-ring ring-1"></div>
-                    <div class="orb-ring ring-2"></div>
-                    <div class="orb-ring ring-3"></div>
-                </div>
+    <!-- ============================================================
+         SIDEBAR
+         ============================================================ -->
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-header drag">
+            <div class="workspace no-drag">
+                <span class="workspace-avatar">I</span>
+                <span class="workspace-name">Igris</span>
             </div>
-            <div class="assistant-state">
-                <h2 id="state-text">IDLE</h2>
-                <p id="status-message">Awaiting Input...</p>
-            </div>
-        </section>
-
-        <!-- Right Panel: Communication Interface -->
-        <section class="comm-panel glass-panel">
-            <div class="chat-container" id="chat-container">
-                <div class="message system-msg">
-                    <span class="sender">[SYSTEM]:</span>
-                    <span class="content">Secure channel established. Ready for interaction.</span>
-                </div>
-            </div>
-            
-            <div class="input-container">
-                <div class="input-wrapper">
-                    <span class="prompt-symbol">></span>
-                    <input type="text" id="user-input" placeholder="Enter command or query..." autocomplete="off">
-                    <button id="voice-btn" class="voice-activate-btn" title="Start voice conversation">
-                        <svg class="voice-icon" viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <rect x="2" y="6" width="2" height="12" rx="1" class="wave-bar bar-1"/>
-                            <rect x="6" y="3" width="2" height="18" rx="1" class="wave-bar bar-2"/>
-                            <rect x="10" y="8" width="2" height="8" rx="1" class="wave-bar bar-3"/>
-                            <rect x="14" y="4" width="2" height="16" rx="1" class="wave-bar bar-4"/>
-                            <rect x="18" y="6" width="2" height="12" rx="1" class="wave-bar bar-5"/>
-                        </svg>
-                    </button>
-                    <button id="send-btn" class="cyber-button">SEND</button>
-                </div>
-            </div>
-        </section>
-        
-    </main>
-
-    <!-- Voice Mode Overlay (hidden by default) -->
-    <div id="voice-overlay" class="voice-overlay hidden">
-        <div class="voice-overlay-backdrop"></div>
-        <div class="voice-overlay-content">
-            <!-- Close / End button at top right -->
-            <button id="voice-close-btn" class="voice-close-btn" title="End voice mode">
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <line x1="18" y1="6" x2="6" y2="18"></line>
-                    <line x1="6" y1="6" x2="18" y2="18"></line>
-                </svg>
+            <button class="icon-btn no-drag" id="collapse-sidebar-btn" title="Close sidebar (Ctrl+\)">
+                <svg viewBox="0 0 16 16" width="16" height="16"><path d="M7.5 3.5L3 8l4.5 4.5M12.5 3.5L8 8l4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
             </button>
+        </div>
 
-            <!-- Main voice orb -->
-            <div class="voice-orb-wrapper">
-                <div class="voice-orb" id="voice-orb">
-                    <div class="voice-orb-glow"></div>
-                    <div class="voice-orb-core"></div>
-                    <div class="voice-ripple ripple-1"></div>
-                    <div class="voice-ripple ripple-2"></div>
-                    <div class="voice-ripple ripple-3"></div>
+        <nav class="sidebar-nav">
+            <button class="nav-item" data-action="new-chat" title="New chat (Ctrl+Shift+O)">
+                <svg class="nav-icon" viewBox="0 0 16 16"><path d="M11.2 2.3l2.5 2.5-7.4 7.4-3.1.6.6-3.1 7.4-7.4z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>
+                <span>New chat</span>
+            </button>
+            <button class="nav-item active" data-view="chat">
+                <svg class="nav-icon" viewBox="0 0 16 16"><path d="M8 1.8l1.4 4.1 4.3.1-3.4 2.6 1.2 4.1L8 10.3l-3.5 2.4 1.2-4.1L2.3 6l4.3-.1L8 1.8z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>
+                <span>Igris AI</span>
+            </button>
+            <button class="nav-item" data-view="inbox">
+                <svg class="nav-icon" viewBox="0 0 16 16"><path d="M2 9.5l1.6-5.2c.1-.5.6-.8 1.1-.8h6.6c.5 0 1 .3 1.1.8L14 9.5V12c0 .6-.4 1-1 1H3c-.6 0-1-.4-1-1V9.5zm0 0h3.5l1 1.5h3l1-1.5H14" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>
+                <span>Inbox</span>
+                <span class="nav-badge hidden" id="inbox-badge">0</span>
+            </button>
+            <button class="nav-item" data-action="settings" title="Settings (Ctrl+,)">
+                <svg class="nav-icon" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.2" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M8 1.5v1.8M8 12.7v1.8M14.5 8h-1.8M3.3 8H1.5M12.6 3.4l-1.3 1.3M4.7 11.3l-1.3 1.3M12.6 12.6l-1.3-1.3M4.7 4.7L3.4 3.4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+                <span>Settings</span>
+            </button>
+        </nav>
+
+        <div class="sidebar-section">
+            <div class="sidebar-section-title">Quick actions</div>
+            <button class="nav-item nav-item-sub" data-prompt="Check my unread emails">
+                <span class="nav-emoji">📬</span><span>Check unread emails</span>
+            </button>
+            <button class="nav-item nav-item-sub" data-prompt="Summarize my recent emails">
+                <span class="nav-emoji">📝</span><span>Summarize inbox</span>
+            </button>
+            <button class="nav-item nav-item-sub" data-prompt="Open VS Code">
+                <span class="nav-emoji">💻</span><span>Open VS Code</span>
+            </button>
+            <button class="nav-item nav-item-sub" data-prompt="Play lofi beats on YouTube">
+                <span class="nav-emoji">🎧</span><span>Play lofi beats</span>
+            </button>
+        </div>
+
+        <div class="sidebar-footer">
+            <div class="connection" id="connection" title="Backend connection">
+                <span class="status-dot" id="status-dot"></span>
+                <span id="status-text">Connecting…</span>
+                <span class="ping" id="ping-metric"></span>
+            </div>
+        </div>
+    </aside>
+
+    <!-- ============================================================
+         MAIN
+         ============================================================ -->
+    <main class="main">
+        <header class="topbar drag">
+            <button class="icon-btn no-drag hidden" id="open-sidebar-btn" title="Open sidebar (Ctrl+\)">
+                <svg viewBox="0 0 16 16" width="16" height="16"><path d="M2.5 4h11M2.5 8h11M2.5 12h11" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+            </button>
+            <div class="breadcrumbs">
+                <span class="crumb-icon" id="crumb-icon">✦</span>
+                <span class="crumb-title" id="crumb-title">Igris AI</span>
+            </div>
+            <div class="topbar-spacer"></div>
+            <div class="topbar-actions no-drag">
+                <button class="topbar-btn" id="speak-toggle" title="Speak typed responses aloud">
+                    <svg class="icon-speaker-off" viewBox="0 0 16 16" width="16" height="16"><path d="M2.5 6h2l3-2.5v9L4.5 10h-2V6z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M10.5 6l3 4M13.5 6l-3 4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+                    <svg class="icon-speaker-on" viewBox="0 0 16 16" width="16" height="16"><path d="M2.5 6h2l3-2.5v9L4.5 10h-2V6z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M10.2 5.8a3 3 0 010 4.4M12 4a5.5 5.5 0 010 8" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+                </button>
+                <button class="topbar-btn" id="mini-mode-btn" title="Compact floating mode">
+                    <svg viewBox="0 0 16 16" width="16" height="16"><rect x="2" y="3" width="12" height="10" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.2"/><rect x="8" y="8" width="4.5" height="3.5" rx=".6" fill="currentColor"/></svg>
+                </button>
+            </div>
+        </header>
+
+        <!-- ================= CHAT VIEW ================= -->
+        <section class="view active" id="view-chat">
+            <div class="scroll" id="chat-scroll">
+                <div class="page">
+                    <div class="page-hero" id="chat-hero">
+                        <div class="page-icon">✦</div>
+                        <h1 class="page-title">Igris AI</h1>
+                        <p class="page-subtitle">Ask anything, open apps, control music, or check your inbox.</p>
+                        <div class="suggestions">
+                            <button class="suggestion" data-prompt="Check my unread emails">
+                                <span class="suggestion-icon">📬</span>
+                                <span class="suggestion-text"><strong>Check my email</strong><span>See what's unread</span></span>
+                            </button>
+                            <button class="suggestion" data-prompt="Summarize my recent emails">
+                                <span class="suggestion-icon">📝</span>
+                                <span class="suggestion-text"><strong>Inbox briefing</strong><span>Summarize recent mail</span></span>
+                            </button>
+                            <button class="suggestion" data-prompt="Open VS Code">
+                                <span class="suggestion-icon">💻</span>
+                                <span class="suggestion-text"><strong>Open an app</strong><span>Launch VS Code</span></span>
+                            </button>
+                            <button class="suggestion" data-prompt="What's my system disk usage? Run df -h">
+                                <span class="suggestion-icon">⌘</span>
+                                <span class="suggestion-text"><strong>Run a command</strong><span>Check disk usage</span></span>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="messages" id="chat-container"></div>
                 </div>
             </div>
 
-            <!-- State label -->
-            <div class="voice-state-label" id="voice-state-label">Tap to start speaking</div>
-
-            <!-- Live transcript area -->
-            <div class="voice-transcript-area">
-                <div class="voice-transcript" id="voice-transcript"></div>
-                <div class="voice-response" id="voice-response"></div>
+            <div class="composer-wrap">
+                <div class="composer" id="composer">
+                    <textarea id="user-input" rows="1" placeholder="Ask Igris anything…" autocomplete="off" spellcheck="true"></textarea>
+                    <div class="composer-bar">
+                        <span class="composer-hint">Enter to send · Shift+Enter for new line</span>
+                        <div class="composer-buttons">
+                            <button class="icon-btn" id="voice-btn" title="Voice mode">
+                                <svg viewBox="0 0 16 16" width="16" height="16"><rect x="5.5" y="1.8" width="5" height="8" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M3.3 7.5a4.7 4.7 0 009.4 0M8 12.2v2" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+                            </button>
+                            <button class="send-btn hidden" id="stop-btn" title="Stop generating">
+                                <svg viewBox="0 0 16 16" width="12" height="12"><rect x="3" y="3" width="10" height="10" rx="2" fill="currentColor"/></svg>
+                            </button>
+                            <button class="send-btn" id="send-btn" title="Send" disabled>
+                                <svg viewBox="0 0 16 16" width="14" height="14"><path d="M8 13V3M3.8 7.2L8 3l4.2 4.2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                            </button>
+                        </div>
+                    </div>
+                </div>
             </div>
+        </section>
 
-            <!-- Bottom controls -->
-            <div class="voice-controls">
-                <button id="voice-mode-toggle" class="voice-control-btn" title="Switch between hands-free and push-to-talk">
-                    <svg id="mode-icon-handsfree" width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
-                        <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/>
-                        <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/>
-                    </svg>
-                    <span id="mode-label">HANDS-FREE</span>
-                </button>
-                <button id="voice-interrupt-btn" class="voice-control-btn voice-interrupt" title="Interrupt">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
-                        <rect x="6" y="4" width="4" height="16" rx="1"/>
-                        <rect x="14" y="4" width="4" height="16" rx="1"/>
-                    </svg>
-                    <span>INTERRUPT</span>
-                </button>
+        <!-- ================= INBOX VIEW ================= -->
+        <section class="view" id="view-inbox">
+            <div class="inbox-layout">
+                <div class="scroll inbox-main">
+                    <div class="page page-wide">
+                        <div class="page-icon">📬</div>
+                        <h1 class="page-title">Inbox</h1>
+                        <p class="page-subtitle" id="inbox-account">Your email, summarized by Igris.</p>
+
+                        <div class="db-toolbar">
+                            <div class="db-tabs">
+                                <button class="db-tab active" data-filter="all">
+                                    <svg viewBox="0 0 16 16" width="14" height="14"><path d="M2.5 4h11M2.5 8h11M2.5 12h11" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+                                    All mail
+                                </button>
+                                <button class="db-tab" data-filter="unread">
+                                    <svg viewBox="0 0 16 16" width="14" height="14"><circle cx="8" cy="8" r="3" fill="currentColor"/></svg>
+                                    Unread
+                                </button>
+                            </div>
+                            <div class="db-tools">
+                                <label class="db-search">
+                                    <svg viewBox="0 0 16 16" width="14" height="14"><circle cx="7" cy="7" r="4.3" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M10.2 10.2L13.5 13.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+                                    <input type="text" id="inbox-search" placeholder="Search" autocomplete="off">
+                                </label>
+                                <button class="icon-btn" id="inbox-refresh" title="Refresh">
+                                    <svg viewBox="0 0 16 16" width="15" height="15"><path d="M13 8a5 5 0 11-1.5-3.6M13 2.5v2.8h-2.8" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                                </button>
+                                <button class="btn btn-primary" id="inbox-summarize">
+                                    <span>✦</span> Summarize
+                                </button>
+                            </div>
+                        </div>
+
+                        <div class="callout hidden" id="inbox-summary">
+                            <div class="callout-icon">✦</div>
+                            <div class="callout-body">
+                                <div class="callout-title">AI briefing</div>
+                                <div class="md" id="inbox-summary-content"></div>
+                            </div>
+                            <button class="icon-btn callout-close" id="inbox-summary-close" title="Dismiss">
+                                <svg viewBox="0 0 16 16" width="12" height="12"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+                            </button>
+                        </div>
+
+                        <div class="db-table" id="inbox-table">
+                            <div class="db-head">
+                                <div class="col col-from"><span class="col-glyph">Aa</span>From</div>
+                                <div class="col col-subject"><span class="col-glyph">≡</span>Subject</div>
+                                <div class="col col-date"><span class="col-glyph">◷</span>Received</div>
+                            </div>
+                            <div id="inbox-list"></div>
+                        </div>
+
+                        <div class="empty-state hidden" id="inbox-empty"></div>
+                    </div>
+                </div>
+
+                <aside class="peek hidden" id="email-peek">
+                    <div class="peek-header">
+                        <button class="icon-btn" id="peek-close" title="Close (Esc)">
+                            <svg viewBox="0 0 16 16" width="16" height="16"><path d="M3.5 3.5L8 8l-4.5 4.5M8.5 3.5L13 8l-4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                        </button>
+                        <div class="peek-header-actions">
+                            <button class="btn btn-ghost" id="peek-ask">Ask Igris</button>
+                            <button class="btn btn-ghost" id="peek-summarize"><span>✦</span> Summarize</button>
+                        </div>
+                    </div>
+                    <div class="peek-body scroll" id="peek-body"></div>
+                </aside>
             </div>
+        </section>
+    </main>
+</div>
+
+<!-- ============================================================
+     SETTINGS MODAL
+     ============================================================ -->
+<div class="modal hidden" id="settings-modal" role="dialog" aria-modal="true">
+    <div class="modal-backdrop" data-close-modal></div>
+    <div class="modal-dialog">
+        <aside class="modal-nav">
+            <div class="modal-nav-heading">Igris</div>
+            <button class="modal-nav-item active" data-tab="ai">
+                <span class="nav-emoji">✦</span>Cloud AI (Gemini)
+            </button>
+            <button class="modal-nav-item" data-tab="email">
+                <span class="nav-emoji">✉️</span>Email
+            </button>
+            <button class="modal-nav-item" data-tab="voice">
+                <span class="nav-emoji">🎙️</span>Voice &amp; audio
+            </button>
+            <button class="modal-nav-item" data-tab="data">
+                <span class="nav-emoji">🗂️</span>Data
+            </button>
+        </aside>
+
+        <div class="modal-content">
+            <!-- Cloud AI (Gemini) -->
+            <section class="settings-tab active" data-tab-panel="ai">
+                <h2 class="settings-title">Cloud AI (Google Assistant Engine)</h2>
+                <p class="settings-desc">Power Igris with Google's Gemini 2.0 Multimodal Live API for real-time speech-to-speech with sub-second response times, Google neural voices, and intelligent tool calling.</p>
+                <div class="settings-divider"></div>
+
+                <form id="ai-form" class="settings-form" autocomplete="off">
+                    <div class="field">
+                        <label for="ai-provider">AI Engine</label>
+                        <select id="ai-provider">
+                            <option value="gemini">Google Gemini (Cloud AI - Real-time Voice)</option>
+                            <option value="local">Local Ollama (Offline Fallback)</option>
+                        </select>
+                    </div>
+                    <div class="field" id="gemini-key-field">
+                        <label for="gemini-api-key">Google AI Studio API Key</label>
+                        <input type="password" id="gemini-api-key" placeholder="AIzaSy...">
+                        <div class="field-help">
+                            Get a free API key at <a data-href="https://aistudio.google.com/app/apikey">aistudio.google.com</a> (Free tier, no credit card required).
+                        </div>
+                    </div>
+                    <div class="field" id="gemini-voice-field">
+                        <label for="gemini-voice">Google Assistant Voice</label>
+                        <select id="gemini-voice">
+                            <option value="Aoede">Aoede — Warm, natural &amp; engaging (Default)</option>
+                            <option value="Puck">Puck — Upbeat, lively &amp; energetic</option>
+                            <option value="Charon">Charon — Calm, thoughtful &amp; deep</option>
+                            <option value="Fenrir">Fenrir — Confident &amp; authoritative</option>
+                            <option value="Kore">Kore — Soft, gentle &amp; clear</option>
+                        </select>
+                    </div>
+                    <div class="form-status hidden" id="ai-form-status"></div>
+                    <div class="form-actions">
+                        <button type="button" class="btn btn-ghost" id="ai-test-btn">Test API Key</button>
+                        <button type="submit" class="btn btn-primary" id="ai-save-btn">Save Settings</button>
+                    </div>
+                </form>
+            </section>
+
+            <!-- Email -->
+            <section class="settings-tab" data-tab-panel="email">
+                <h2 class="settings-title">Email</h2>
+                <p class="settings-desc">Connect your mailbox over IMAP so Igris can check, read and summarize your email. Credentials are stored locally on this computer only.</p>
+                <div class="settings-divider"></div>
+
+                <div class="account-card hidden" id="email-connected-card">
+                    <div class="account-avatar" id="email-connected-avatar">@</div>
+                    <div class="account-info">
+                        <div class="account-email" id="email-connected-address"></div>
+                        <div class="account-meta" id="email-connected-meta"></div>
+                    </div>
+                    <button class="btn btn-danger-ghost" id="email-disconnect">Disconnect</button>
+                </div>
+
+                <form id="email-form" class="settings-form" autocomplete="off">
+                    <div class="field">
+                        <label for="email-provider">Provider</label>
+                        <select id="email-provider">
+                            <option value="gmail">Gmail</option>
+                            <option value="outlook">Outlook / Microsoft 365</option>
+                            <option value="icloud">iCloud Mail</option>
+                            <option value="yahoo">Yahoo Mail</option>
+                            <option value="custom">Other (custom IMAP)</option>
+                        </select>
+                    </div>
+                    <div class="field">
+                        <label for="email-address">Email address</label>
+                        <input type="email" id="email-address" placeholder="you@example.com" required>
+                    </div>
+                    <div class="field">
+                        <label for="email-password">App password</label>
+                        <input type="password" id="email-password" placeholder="xxxx xxxx xxxx xxxx">
+                        <div class="field-help" id="email-provider-help"></div>
+                    </div>
+                    <div class="field-row hidden" id="email-custom-fields">
+                        <div class="field">
+                            <label for="email-host">IMAP server</label>
+                            <input type="text" id="email-host" placeholder="imap.example.com">
+                        </div>
+                        <div class="field field-small">
+                            <label for="email-port">Port</label>
+                            <input type="number" id="email-port" value="993" min="1" max="65535">
+                        </div>
+                    </div>
+                    <div class="form-status hidden" id="email-form-status"></div>
+                    <div class="form-actions">
+                        <button type="button" class="btn btn-ghost" id="email-test">Test connection</button>
+                        <button type="submit" class="btn btn-primary" id="email-save">Connect</button>
+                    </div>
+                </form>
+            </section>
+
+            <!-- Voice -->
+            <section class="settings-tab" data-tab-panel="voice">
+                <h2 class="settings-title">Voice &amp; audio</h2>
+                <p class="settings-desc">Control how Igris listens and speaks.</p>
+                <div class="settings-divider"></div>
+
+                <div class="setting-row">
+                    <div class="setting-text">
+                        <div class="setting-label">Speak typed responses</div>
+                        <div class="setting-sub">Read replies aloud when you type. Voice mode always speaks.</div>
+                    </div>
+                    <label class="switch"><input type="checkbox" id="setting-speak"><span class="slider"></span></label>
+                </div>
+                <div class="setting-row">
+                    <div class="setting-text">
+                        <div class="setting-label">Default voice input</div>
+                        <div class="setting-sub">Hands-free detects when you stop talking. Push-to-talk uses the Space key.</div>
+                    </div>
+                    <select id="setting-voice-mode" class="select-compact">
+                        <option value="hands-free">Hands-free</option>
+                        <option value="push-to-talk">Push-to-talk</option>
+                    </select>
+                </div>
+            </section>
+
+            <!-- Data -->
+            <section class="settings-tab" data-tab-panel="data">
+                <h2 class="settings-title">Data</h2>
+                <p class="settings-desc">Igris keeps conversation memory in a local SQLite database.</p>
+                <div class="settings-divider"></div>
+                <div class="setting-row">
+                    <div class="setting-text">
+                        <div class="setting-label">Clear chat history</div>
+                        <div class="setting-sub">Permanently deletes all saved conversation memory.</div>
+                    </div>
+                    <button class="btn btn-danger-ghost" id="setting-clear-history">Clear history</button>
+                </div>
+            </section>
+        </div>
+
+        <button class="icon-btn modal-close" data-close-modal title="Close (Esc)">
+            <svg viewBox="0 0 16 16" width="14" height="14"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+        </button>
+    </div>
+</div>
+
+<!-- ============================================================
+     VOICE MODE OVERLAY
+     ============================================================ -->
+<div id="voice-overlay" class="voice-overlay hidden">
+    <div class="voice-overlay-content">
+        <button id="voice-close-btn" class="icon-btn voice-close-btn" title="End voice mode (Esc)">
+            <svg viewBox="0 0 16 16" width="16" height="16"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+        </button>
+
+        <div class="voice-badge" id="voice-engine-badge">
+            <span class="voice-engine-dot"></span>
+            <span id="voice-engine-text">Gemini 2.0 Live</span>
+        </div>
+
+        <div class="voice-orb-wrapper">
+            <div class="voice-orb idle" id="voice-orb">
+                <div class="voice-ring ring-a"></div>
+                <div class="voice-ring ring-b"></div>
+                <div class="voice-orb-core"></div>
+            </div>
+            <!-- Google Assistant 4-Color Waveform -->
+            <div class="google-wave" id="google-wave">
+                <span class="g-bar g-blue"></span>
+                <span class="g-bar g-red"></span>
+                <span class="g-bar g-yellow"></span>
+                <span class="g-bar g-green"></span>
+            </div>
+        </div>
+
+        <div class="voice-state-label" id="voice-state-label">Tap to start speaking</div>
+        <div class="voice-action-pill hidden" id="voice-action-pill">
+            <span class="action-spinner">✦</span>
+            <span id="voice-action-text">Checking emails…</span>
+        </div>
+
+        <div class="voice-transcript-area">
+            <div class="voice-transcript" id="voice-transcript"></div>
+            <div class="voice-response" id="voice-response"></div>
+        </div>
+
+        <div class="voice-controls">
+            <button id="voice-mode-toggle" class="btn btn-ghost voice-control-btn" title="Switch between hands-free and push-to-talk">
+                <svg viewBox="0 0 16 16" width="14" height="14"><rect x="5.5" y="1.8" width="5" height="8" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M3.3 7.5a4.7 4.7 0 009.4 0M8 12.2v2" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+                <span id="mode-label">Hands-free</span>
+            </button>
+            <button id="voice-interrupt-btn" class="btn btn-ghost voice-control-btn" title="Interrupt">
+                <svg viewBox="0 0 16 16" width="14" height="14"><rect x="4" y="3" width="2.6" height="10" rx=".8" fill="currentColor"/><rect x="9.4" y="3" width="2.6" height="10" rx=".8" fill="currentColor"/></svg>
+                <span>Interrupt</span>
+            </button>
         </div>
     </div>
+</div>
 
-    <script src="renderer.js"></script>
+<div class="toast-container" id="toast-container"></div>
+
+<script src="renderer.js"></script>
 </body>
 </html>

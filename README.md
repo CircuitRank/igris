@@ -1,6 +1,47 @@
-# Igris - Cross-Platform AI Assistant (Jarvis)
+# Igris - Notion-Style Google Assistant AI & Email Workspace
 
-Igris is a powerful, cross-platform voice-activated AI assistant built with Electron and Python (FastAPI). It natively supports Windows, Linux, and macOS, seamlessly integrating with your operating system to open apps, play music, execute terminal commands, and more.
+Igris is a sleek, black, minimalistic desktop AI assistant and workspace built with Electron and Python (FastAPI). Designed in the visual language of Notion, Igris functions exactly like a real-time **Google Voice Assistant** powered by **Google Gemini 2.0 Flash Multimodal Live API** (or offline local Ollama), complete with bidirectional speech-to-speech, Google neural voices, cross-platform OS app control, and an integrated IMAP email workspace.
+
+## Features
+
+- **Google Voice Assistant Mode (Cloud AI)**:
+  - Powered by Google DeepMind's **Gemini 2.0 Flash Multimodal Live API** via raw WebSockets.
+  - Sub-second speech-to-speech with natural intonation and cadence.
+  - 5 expressive Google Assistant voices: **Aoede** (warm & natural), **Puck** (upbeat & energetic), **Charon** (calm & deep), **Fenrir** (authoritative), and **Kore** (gentle).
+  - Signature Google Assistant 4-color wave animation (Blue, Red, Yellow, Green) responsive to speaking and listening states.
+  - Native barge-in: seamlessly speak over the assistant at any moment to interrupt or redirect.
+  - Automatic offline fallback: falls back to local Whisper + Ollama (`qwen2.5-coder:3b`) + Edge TTS when offline or if an API key is not supplied.
+- **Sleek Notion Dark Aesthetic**:
+  - Exact Notion dark theme palette (`#191919` canvas, `#202020` sidebar, `#252525` modal surfaces).
+  - Collapsible sidebar with multi-page navigation (`Igris AI` and `Inbox`).
+  - Database view with unread filters, real-time search, and unread badges.
+  - Notion-style callouts, clean typography, code block syntax highlighting, and side peek drawer.
+- **Integrated Email Workspace (IMAP)**:
+  - Connect Gmail, Outlook, iCloud, Yahoo, or custom IMAP with one click in Settings.
+  - Interactive Inbox database table with unread filters, live search, and unread badges.
+  - Side peek drawer to view email headers, attachments, and full bodies.
+  - One-click AI summaries for your entire inbox or individual emails.
+  - Natural conversational email queries: *"Check my unread emails"*, *"Summarize email #1"*, or *"Do I have any emails from John?"*.
+- **Direct Computer Control & System Tools**:
+  - Open desktop apps (`VS Code`, `Chrome`, `Spotify`, `Settings`, `Terminal`) cross-platform without URL mistargeting.
+  - Run terminal commands (`execute_command`) safely with timeouts.
+  - Control media playback (Play, Pause, Skip, Prev) across Linux, macOS, and Windows.
+  - Screen capture & visual analysis (`analyze_screen`).
+  - DuckDuckGo live web search (`web_search`).
+- **Compact Floating Mode**:
+  - Click `MINI` in the top bar to snap Igris into a floating desktop widget.
+
+## Keyboard Shortcuts
+
+- `Ctrl + \` / `Cmd + \`: Toggle sidebar
+- `Ctrl + ,` / `Cmd + ,`: Open Settings (Cloud AI, Email, Voice, Data)
+- `Ctrl + Shift + O` / `Cmd + Shift + O`: Start New Chat
+- `Enter`: Send message
+- `Shift + Enter`: Multi-line prompt in composer
+- `Space` (held in Voice Mode): Push-to-Talk
+- `Escape`: Close modals, close email peek, or stop voice mode / generation
+
+---
 
 ## Windows Setup Guide
 

@@ -28,7 +28,10 @@ from pydub import AudioSegment
 import torch
 import torchaudio
 import df_compat  # Patch torchaudio for DeepFilterNet compatibility (must be before df imports)
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+import email_service
+import gemini_service
+from typing import Any, Optional
+from fastapi import Body, FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 # ============================================================
@@ -38,11 +41,13 @@ CURRENT_OS = platform.system()  # 'Linux', 'Windows', 'Darwin'
 print(f"[SYSTEM] Detected OS: {CURRENT_OS}")
 
 # Initialize DB
-db_conn = sqlite3.connect("igris_memory.db", check_same_thread=False)
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "igris_memory.db")
+db_conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 cursor = db_conn.cursor()
 cursor.execute("CREATE TABLE IF NOT EXISTS history (id INTEGER PRIMARY KEY, role TEXT, content TEXT)")
 db_conn.commit()
 db_lock = threading.Lock()
+email_service.init_email_tables(db_conn, db_lock)
 
 # Initialize Whisper (Handle offline error gracefully)
 whisper_model = None
@@ -175,6 +180,7 @@ app = FastAPI(lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://127.0.0.1:8000", "http://localhost:8000", "file://", "null"],
+    allow_origin_regex=r"^(file://.*|null|http://127\.0\.0\.1(:\d+)?|http://localhost(:\d+)?)$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -183,6 +189,266 @@ app.add_middleware(
 @app.get("/")
 def read_root():
     return {"message": "Igris Backend is Running"}
+
+
+# ============================================================
+# REST API — History & Email (IMAP) Workspace Endpoints
+# ============================================================
+
+@app.get("/api/history")
+def api_get_history(limit: int = 30):
+    with db_lock:
+        cursor.execute(
+            "SELECT role, content FROM history ORDER BY id DESC LIMIT ?",
+            (max(1, min(limit, 100)),),
+        )
+        rows = cursor.fetchall()
+    rows.reverse()
+    return {"messages": [{"role": r[0], "content": r[1]} for r in rows]}
+
+
+@app.delete("/api/history")
+def api_clear_history():
+    with db_lock:
+        cursor.execute("DELETE FROM history")
+        db_conn.commit()
+    return {"ok": True}
+
+
+@app.get("/api/email/settings")
+def api_get_email_settings():
+    return email_service.get_email_settings(db_conn, db_lock, include_secret=False)
+
+
+@app.post("/api/email/settings")
+async def api_save_email_settings(payload: dict[str, Any] = Body(...)):
+    provider = str(payload.get("provider", "gmail")).strip().lower()
+    email_address = str(payload.get("email_address", "")).strip()
+    app_password = payload.get("app_password")
+    imap_host = str(payload.get("imap_host", "")).strip()
+    try:
+        imap_port = int(payload.get("imap_port", 993) or 993)
+    except (TypeError, ValueError):
+        imap_port = 993
+
+    existing = email_service.get_email_settings(db_conn, db_lock, include_secret=True)
+    effective_pw = (
+        str(app_password)
+        if (app_password is not None and str(app_password) != "")
+        else existing.get("app_password", "")
+    )
+
+    if not email_address:
+        return {"ok": False, "message": "Email address is required."}
+    if not effective_pw:
+        return {"ok": False, "message": "App Password is required."}
+
+    test_res = await asyncio.to_thread(
+        email_service.test_imap_connection,
+        provider,
+        email_address,
+        effective_pw,
+        imap_host,
+        imap_port,
+    )
+    if not test_res.get("ok"):
+        return {
+            "ok": False,
+            "message": test_res.get("message", "Could not connect to IMAP server."),
+        }
+
+    saved = email_service.save_email_settings(
+        db_conn,
+        db_lock,
+        provider=provider,
+        email_address=email_address,
+        app_password=test_res.get("normalized_password", effective_pw),
+        imap_host=imap_host,
+        imap_port=imap_port,
+    )
+    return {
+        "ok": True,
+        "message": test_res.get("message", "Email connected."),
+        "unread_count": test_res.get("unread_count", 0),
+        "settings": saved,
+    }
+
+
+@app.post("/api/email/test")
+async def api_test_email_settings(payload: dict[str, Any] = Body(...)):
+    provider = str(payload.get("provider", "gmail")).strip().lower()
+    email_address = str(payload.get("email_address", "")).strip()
+    app_password = payload.get("app_password")
+    imap_host = str(payload.get("imap_host", "")).strip()
+    try:
+        imap_port = int(payload.get("imap_port", 993) or 993)
+    except (TypeError, ValueError):
+        imap_port = 993
+
+    existing = email_service.get_email_settings(db_conn, db_lock, include_secret=True)
+    effective_pw = (
+        str(app_password)
+        if (app_password is not None and str(app_password) != "")
+        else existing.get("app_password", "")
+    )
+
+    return await asyncio.to_thread(
+        email_service.test_imap_connection,
+        provider,
+        email_address,
+        effective_pw,
+        imap_host,
+        imap_port,
+    )
+
+
+@app.delete("/api/email/settings")
+def api_delete_email_settings():
+    email_service.clear_email_settings(db_conn, db_lock)
+    return {"ok": True}
+
+
+@app.get("/api/email/messages")
+async def api_list_email_messages(
+    unread_only: bool = False,
+    limit: int = 25,
+    search: str = "",
+):
+    return await asyncio.to_thread(
+        email_service.fetch_inbox_messages,
+        db_conn,
+        db_lock,
+        unread_only,
+        limit,
+        search,
+    )
+
+
+@app.get("/api/email/messages/{uid}")
+async def api_get_email_detail(uid: str, mark_read: bool = True):
+    return await asyncio.to_thread(
+        email_service.fetch_email_detail,
+        db_conn,
+        db_lock,
+        uid,
+        None,
+        mark_read,
+    )
+
+
+@app.post("/api/email/summarize")
+async def api_summarize_emails(payload: dict[str, Any] = Body(...)):
+    uid = payload.get("uid")
+    unread_only = bool(payload.get("unread_only", True))
+    limit = int(payload.get("limit", 8) or 8)
+
+    if uid:
+        detail = await asyncio.to_thread(
+            email_service.fetch_email_detail, db_conn, db_lock, str(uid), None, False
+        )
+        if not detail.get("ok"):
+            return {"ok": False, "error": detail.get("error", "Could not load email.")}
+        em = detail["email"]
+        prompt = (
+            "Summarize this email concisely in 2-4 crisp bullet points (Key message, "
+            "important details/dates, and any required action item). Plain markdown bullets:\n\n"
+            f"From: {em['from_name']} <{em['from_email']}>\n"
+            f"Date: {em['date']}\n"
+            f"Subject: {em['subject']}\n\n"
+            f"{em['body'][:4500]}"
+        )
+    else:
+        inbox = await asyncio.to_thread(
+            email_service.fetch_inbox_messages, db_conn, db_lock, unread_only, limit, ""
+        )
+        if not inbox.get("ok"):
+            return {"ok": False, "error": inbox.get("error", "Could not fetch inbox.")}
+        if not inbox.get("messages"):
+            return {
+                "ok": True,
+                "summary": "Your inbox is clear — no unread emails to summarize.",
+                "unread_count": inbox.get("unread_count", 0),
+            }
+        formatted = email_service.format_emails_for_llm(inbox)
+        prompt = (
+            "Create a concise executive briefing of these emails. Group by priority/action needed "
+            "in 3-5 short bullet points:\n\n"
+            f"{formatted}"
+        )
+
+    ai_cfg = gemini_service.get_ai_settings(db_conn, db_lock, mask_key=False)
+    if ai_cfg.get("has_key") and ai_cfg.get("provider") == "gemini":
+        try:
+            tokens = []
+            async for tok in gemini_service.gemini_chat_stream(
+                api_key=ai_cfg["api_key"],
+                messages=[{"role": "user", "content": prompt}],
+                model=ai_cfg.get("model", "gemini-2.0-flash"),
+            ):
+                tokens.append(tok)
+            summary_res = "".join(tokens).strip()
+            if summary_res and not summary_res.startswith("[Gemini Error"):
+                return {"ok": True, "summary": summary_res}
+        except Exception as ex:
+            print(f"[Gemini] Summary fallback to Ollama: {ex}")
+
+    try:
+        async with httpx.AsyncClient(timeout=45.0) as client:
+            resp = await client.post(
+                "http://127.0.0.1:11434/api/chat",
+                json={
+                    "model": "qwen2.5-coder:3b",
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "You are Igris, a concise executive assistant. Output crisp bullet points without filler.",
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    "stream": False,
+                },
+            )
+            data = resp.json()
+            summary = data.get("message", {}).get("content", "").strip()
+            if not summary:
+                return {"ok": False, "error": data.get("error", "Empty response from local AI model.")}
+            return {"ok": True, "summary": summary}
+    except Exception as exc:
+        return {"ok": False, "error": f"AI summary failed (ensure Ollama or Gemini is configured): {exc}"}
+
+
+# ============================================================
+# REST API — Cloud AI Settings & Key Verification
+# ============================================================
+
+@app.get("/api/ai/settings")
+def api_get_ai_settings():
+    return gemini_service.get_ai_settings(db_conn, db_lock, mask_key=True)
+
+
+@app.post("/api/ai/settings")
+def api_save_ai_settings(payload: dict[str, Any] = Body(...)):
+    provider = payload.get("provider", "gemini")
+    api_key = payload.get("api_key")
+    voice = payload.get("voice")
+    model = payload.get("model")
+    settings = gemini_service.save_ai_settings(
+        db_conn, db_lock, provider=provider, api_key=api_key, voice=voice, model=model
+    )
+    return {
+        "ok": True,
+        "message": "AI settings saved successfully.",
+        "settings": settings,
+    }
+
+
+@app.post("/api/ai/test")
+async def api_test_ai(payload: dict[str, Any] = Body(...)):
+    api_key = payload.get("api_key")
+    if not api_key:
+        cfg = gemini_service.get_ai_settings(db_conn, db_lock, mask_key=False)
+        api_key = cfg.get("api_key", "")
+    return await gemini_service.test_gemini_api_key(api_key)
 
 # ============================================================
 # Cross-platform helper functions
@@ -571,13 +837,51 @@ TOOLS = [{
             "required": ["prompt"]
         }
     }
+}, {
+    "type": "function",
+    "function": {
+        "name": "check_emails",
+        "description": "Check the user's email inbox via IMAP. Use this whenever the user asks to check their emails, unread mail, inbox, or search for emails from a sender or about a topic.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "unread_only": {"type": "boolean", "description": "Set true to fetch only unread emails, false for recent emails"},
+                "limit": {"type": "integer", "description": "Maximum number of emails to check (default 6)"},
+                "search_query": {"type": "string", "description": "Optional sender name, email address, or subject keyword"}
+            },
+            "required": []
+        }
+    }
+}, {
+    "type": "function",
+    "function": {
+        "name": "read_email",
+        "description": "Read the full body of a specific email by its UID or 1-based number from the most recent inbox check.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "uid": {"type": "string", "description": "Email UID string (e.g. '1042')"},
+                "index": {"type": "integer", "description": "1-based index from the latest email list (e.g. 1 for the newest email)"}
+            },
+            "required": []
+        }
+    }
 }]
 
 # ============================================================
 # Tool Execution — now cross-platform
 # ============================================================
 
-async def execute_tool(name: str, arguments: dict, websocket: WebSocket) -> str:
+KNOWN_CANONICAL_APPS = {
+    "terminal", "cmd", "powershell", "command prompt",
+    "chrome", "google chrome", "firefox", "brave", "edge",
+    "vscode", "vs code", "visual studio code", "code", "sublime", "sublime text",
+    "file manager", "files", "finder", "explorer", "nautilus",
+    "calculator", "settings", "spotify", "discord", "slack", "telegram",
+    "notepad", "text editor",
+}
+
+async def execute_tool(name: str, arguments: dict, websocket: Optional[WebSocket] = None) -> str:
     # Handle Qwen2.5-coder nested argument format
     for k, v in list(arguments.items()):
         if isinstance(v, dict) and "value" in v:
@@ -585,6 +889,14 @@ async def execute_tool(name: str, arguments: dict, websocket: WebSocket) -> str:
             
     if name == "smart_open":
         target = arguments.get("target", "").lower().strip()
+        if target in ("inbox", "email", "emails", "mail"):
+            if websocket:
+                await websocket.send_text(json.dumps({"type": "navigate", "view": "inbox"}))
+            return "Opened your Inbox view inside Igris."
+
+        if target in KNOWN_CANONICAL_APPS:
+            return open_application_cross_platform(target)
+
         # Check DB
         with db_lock:
             cursor.execute("SELECT name, cmd FROM apps WHERE name LIKE ?", (f"%{target}%",))
@@ -592,7 +904,7 @@ async def execute_tool(name: str, arguments: dict, websocket: WebSocket) -> str:
             
         if rows:
             # Prefer exact match or shortest name match
-            best_match = min(rows, key=lambda r: len(r[0]))
+            best_match = min(rows, key=lambda r: (0 if r[0] == target else 1, len(r[0])))
             cmd = best_match[1]
             try:
                 subprocess.Popen(cmd, shell=True, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -601,16 +913,18 @@ async def execute_tool(name: str, arguments: dict, websocket: WebSocket) -> str:
                 return f"Failed to open application: {e}"
         else:
             # Treat as website
-            if not target.startswith("http"):
-                if "." not in target:
-                    target = target + ".com"
-                target = "https://" + target
+            clean_host = target.replace(" ", "")
+            if not clean_host.startswith("http"):
+                if "." not in clean_host:
+                    clean_host = clean_host + ".com"
+                clean_host = "https://" + clean_host
             
-            await websocket.send_text(json.dumps({
-                "type": "open_sandbox_browser",
-                "url": target
-            }))
-            return f"Successfully opened website '{target}' in a secure sandbox browser."
+            if websocket:
+                await websocket.send_text(json.dumps({
+                    "type": "open_sandbox_browser",
+                    "url": clean_host
+                }))
+            return f"Successfully opened website '{clean_host}' in a secure sandbox browser."
     
     elif name == "execute_command":
         cmd = arguments.get("command", "")
@@ -724,8 +1038,66 @@ async def execute_tool(name: str, arguments: dict, websocket: WebSocket) -> str:
                 return data.get("response", "No response from vision model")
         except Exception as e:
             return f"Screen analysis failed: {e}"
-    
 
+    elif name == "check_emails":
+        unread_only = bool(arguments.get("unread_only", False))
+        try:
+            limit = int(arguments.get("limit", 6) or 6)
+        except (TypeError, ValueError):
+            limit = 6
+        search_query = str(arguments.get("search_query", "") or "")
+
+        res = await asyncio.to_thread(
+            email_service.fetch_inbox_messages,
+            db_conn,
+            db_lock,
+            unread_only,
+            limit,
+            search_query,
+        )
+        if websocket:
+            try:
+                await websocket.send_text(
+                    json.dumps(
+                        {
+                            "type": "email_checked",
+                            "configured": res.get("configured", False),
+                            "unread_count": res.get("unread_count", 0),
+                        }
+                    )
+                )
+            except Exception:
+                pass
+        return email_service.format_emails_for_llm(res)
+
+    elif name == "read_email":
+        uid = arguments.get("uid")
+        index = arguments.get("index")
+        res = await asyncio.to_thread(
+            email_service.fetch_email_detail,
+            db_conn,
+            db_lock,
+            str(uid) if uid is not None else None,
+            int(index) if index is not None else None,
+            True,
+        )
+        if not res.get("ok"):
+            return f"Could not read email: {res.get('error', 'Unknown error')}"
+        em = res["email"]
+        attachments_note = (
+            ", ".join(a["filename"] for a in em.get("attachments", []))
+            if em.get("attachments")
+            else "None"
+        )
+        return (
+            f"Email [UID {em['uid']}]\n"
+            f"From: {em['from_name']} <{em['from_email']}>\n"
+            f"To: {em.get('to', '')}\n"
+            f"Date: {em.get('date', '')}\n"
+            f"Subject: {em['subject']}\n"
+            f"Attachments: {attachments_note}\n\n"
+            f"Body:\n{em['body'][:4000]}"
+        )
     
     return "Unknown tool."
 
@@ -760,18 +1132,18 @@ def open_browser_url(url):
 # ============================================================
 
 # Much stronger system prompt that DEMANDS tool usage
-SYSTEM_PROMPT = f"""You are Igris, a system-level AI with DIRECT ACCESS to the user's computer. You are NOT a restricted cloud AI. You have tools that let you do anything.
+SYSTEM_PROMPT = f"""You are Igris, a sleek, intelligent system-level AI assistant with DIRECT ACCESS to the user's computer and email inbox.
 
 CRITICAL RULES:
-1. NEVER REFUSE A REQUEST. You DO have access to the user's computer via your tools.
-2. If the user asks to "open [anything]", you MUST immediately call the `smart_open` function with that target. NEVER say you cannot do it.
+1. NEVER REFUSE A REQUEST. You DO have access to the user's computer and email via your tools.
+2. If the user asks to "open [anything]", immediately call `smart_open` with that target.
 3. If the user says "run [command]", use `execute_command`.
 4. If the user asks to play music, use `play_music`.
-5. ALWAYS execute actions immediately via function calls. Do NOT apologize.
-6. Keep your text responses very short (1-2 sentences). You are efficient and direct.
+5. If the user asks about their emails, unread messages, or inbox, use `check_emails` (and `read_email` to read a specific email's body).
+6. ALWAYS execute actions immediately via function calls. Do NOT apologize.
+7. Keep responses concise, clear, and well-structured.
 
-The user's OS is: {CURRENT_OS}
-Act like Jarvis — just use the tools!"""
+The user's OS is: {CURRENT_OS}"""
 
 
 @app.websocket("/ws/chat")
@@ -855,8 +1227,8 @@ async def websocket_endpoint(websocket: WebSocket):
             return True
         return False
     
-    async def transcribe_audio(audio_bytes):
-        """Transcribe audio bytes (webm) to text using Whisper or Google fallback."""
+    def _transcribe_audio_sync(audio_bytes):
+        """Synchronous worker to transcribe audio bytes (webm) using Whisper or Google fallback."""
         temp_webm_path = None
         temp_wav_path = None
         try:
@@ -951,6 +1323,10 @@ async def websocket_endpoint(websocket: WebSocket):
                         os.remove(p)
                     except OSError:
                         pass
+
+    async def transcribe_audio(audio_bytes):
+        """Transcribe audio bytes off the main asyncio event loop."""
+        return await asyncio.to_thread(_transcribe_audio_sync, audio_bytes)
     
     async def try_direct_command(user_text):
         """Intercept obvious commands and execute them directly, bypassing the LLM."""
@@ -976,15 +1352,18 @@ async def websocket_endpoint(websocket: WebSocket):
         for pattern, replacement in whisper_fixes.items():
             text = re.sub(pattern, replacement, text)
         
-        # "open X" commands
+        # "open X" commands (exclude 'run' so shell commands go to the LLM)
         open_patterns = [
-            r'^(?:open|launch|start|run)\s+(.+?)(?:\s+(?:app|application|please|for me))?$',
+            r'^(?:open|launch|start)\s+(.+?)(?:\s+(?:app|application|please|for me))?$',
             r'^(?:can you |could you |please )?(?:open|launch|start)\s+(.+?)(?:\s+(?:please|for me))?$',
         ]
         for pattern in open_patterns:
             match = re.match(pattern, text)
             if match:
                 target = match.group(1).strip()
+                # Let natural email reading requests go to the LLM instead of opening a URL
+                if any(w in target for w in ("unread", "latest email", "recent email", "my email")):
+                    break
                 result = await execute_tool("smart_open", {"target": target}, websocket)
                 return result
         
@@ -997,8 +1376,8 @@ async def websocket_endpoint(websocket: WebSocket):
             result = await execute_tool("play_music", {"query": query, "platform": platform}, websocket)
             return result
         
-        # "search for X" commands
-        search_match = re.match(r'^(?:search|google|look up|search for|what is|who is|what are)\s+(.+)$', text)
+        # Explicit web search commands (do not hijack general 'what is / who is' questions)
+        search_match = re.match(r'^(?:search|google|look up|search for|search the web for)\s+(.+)$', text)
         if search_match:
             query = search_match.group(1).strip()
             result = await execute_tool("web_search", {"query": query}, websocket)
@@ -1016,9 +1395,48 @@ async def websocket_endpoint(websocket: WebSocket):
         
         return None  # Not a direct command, let the LLM handle it
 
-    async def process_llm(user_text, is_voice=False):
+    def _detect_email_intent(user_text: str) -> Optional[dict[str, Any]]:
+        """Detect explicit email inbox queries so small local models get live IMAP data reliably."""
+        low = user_text.lower().strip()
+        if not re.search(r"\b(emails?|inbox|mail|unread)\b", low):
+            return None
+        # Skip if user is asking to write/draft/compose an email without checking inbox
+        if re.search(r"\b(write|draft|compose)\b", low) and not re.search(
+            r"\b(check|read|summarize|inbox|unread|recent|latest|any|from)\b", low
+        ):
+            return None
+        if re.search(r"\b(check|any|unread|inbox|summarize|latest|recent|new|show|list|from)\b", low):
+            unread_only = bool(re.search(r"\b(unread|new)\b", low)) and not bool(
+                re.search(r"\b(all|recent)\b", low)
+            )
+            from_match = re.search(r"\bfrom\s+([a-z0-9_.@-]+(?:\s+[a-z0-9_.@-]+)?)", low)
+            search_q = from_match.group(1).strip() if from_match else ""
+            return {"unread_only": unread_only, "limit": 8, "search_query": search_q}
+        return None
+
+    async def _speak_sentence(text_to_speak: str):
+        """Synthesize and stream a single sentence of TTS audio if not interrupted."""
+        if not text_to_speak or is_interrupted:
+            return
+        try:
+            await websocket.send_text(json.dumps({"type": "speaking_start"}))
+            communicate = edge_tts.Communicate(text_to_speak, "en-US-ChristopherNeural")
+            audio_data = b""
+            async for ac in communicate.stream():
+                if is_interrupted:
+                    break
+                if ac["type"] == "audio":
+                    audio_data += ac["data"]
+            if audio_data and not is_interrupted:
+                b64_audio = base64.b64encode(audio_data).decode("utf-8")
+                await websocket.send_text(json.dumps({"type": "audio", "data": b64_audio}))
+        except Exception as e:
+            print(f"TTS Error: {e}")
+
+    async def process_llm(user_text, is_voice=False, tts_enabled=False):
         nonlocal is_interrupted
         is_interrupted = False
+        should_speak = bool(is_voice or tts_enabled)
         
         # Try direct command execution first (bypasses LLM for reliability)
         direct_result = await try_direct_command(user_text)
@@ -1034,23 +1452,9 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.send_text(json.dumps({"type": "stream_chunk", "content": direct_result}))
             await websocket.send_text(json.dumps({"type": "stream_end"}))
             
-            # TTS for voice mode
-            if is_voice and not is_interrupted:
-                try:
-                    text_to_speak = direct_result.replace('*', '')
-                    await websocket.send_text(json.dumps({"type": "speaking_start"}))
-                    communicate = edge_tts.Communicate(text_to_speak, "en-US-ChristopherNeural")
-                    audio_data = b""
-                    async for ac in communicate.stream():
-                        if is_interrupted: break
-                        if ac["type"] == "audio":
-                            audio_data += ac["data"]
-                    if audio_data and not is_interrupted:
-                        b64_audio = base64.b64encode(audio_data).decode('utf-8')
-                        await websocket.send_text(json.dumps({"type": "audio", "data": b64_audio}))
-                    await websocket.send_text(json.dumps({"type": "speaking_end"}))
-                except Exception as e:
-                    print(f"TTS Error: {e}")
+            if should_speak and not is_interrupted:
+                await _speak_sentence(direct_result.replace('*', ''))
+                await websocket.send_text(json.dumps({"type": "speaking_end"}))
             return
         
         messages.append({"role": "user", "content": user_text})
@@ -1058,7 +1462,75 @@ async def websocket_endpoint(websocket: WebSocket):
             cursor.execute("INSERT INTO history (role, content) VALUES (?, ?)", ("user", user_text))
             db_conn.commit()
         tool_call_count = 0
+
+        # Proactively fetch live inbox context when user explicitly asks about their emails
+        email_intent = _detect_email_intent(user_text)
+        if email_intent is not None:
+            await websocket.send_text(json.dumps({"type": "status", "content": "Checking inbox..."}))
+            inbox_text = await execute_tool("check_emails", email_intent, websocket)
+            if inbox_text.startswith("Email check failed: Email account is not configured"):
+                unconfigured_msg = (
+                    "Your email account isn't connected yet. Open **Settings → Email (IMAP)** "
+                    "in the sidebar to add your email address and App Password."
+                )
+                messages.append({"role": "assistant", "content": unconfigured_msg})
+                with db_lock:
+                    cursor.execute("INSERT INTO history (role, content) VALUES (?, ?)", ("assistant", unconfigured_msg))
+                    db_conn.commit()
+                await websocket.send_text(json.dumps({"type": "stream_start"}))
+                await websocket.send_text(json.dumps({"type": "stream_chunk", "content": unconfigured_msg}))
+                await websocket.send_text(json.dumps({"type": "stream_end"}))
+                if should_speak and not is_interrupted:
+                    await _speak_sentence(unconfigured_msg.replace('*', ''))
+                    await websocket.send_text(json.dumps({"type": "speaking_end"}))
+                return
+            messages.append({
+                "role": "system",
+                "content": f"Live IMAP inbox snapshot just retrieved for the user's request:\n{inbox_text}\nSummarize or answer the user's question clearly based on these emails."
+            })
         
+        ai_cfg = gemini_service.get_ai_settings(db_conn, db_lock, mask_key=False)
+        if ai_cfg.get("has_key") and ai_cfg.get("provider") == "gemini":
+            try:
+                response_content = ""
+                has_started_streaming = False
+                current_sentence = ""
+                async for token in gemini_service.gemini_chat_stream(
+                    api_key=ai_cfg["api_key"],
+                    messages=messages,
+                    model=ai_cfg.get("model", "gemini-2.0-flash"),
+                ):
+                    if is_interrupted:
+                        break
+                    if not has_started_streaming:
+                        await websocket.send_text(json.dumps({"type": "stream_start"}))
+                        has_started_streaming = True
+                    response_content += token
+                    await websocket.send_text(json.dumps({"type": "stream_chunk", "content": token}))
+                    if should_speak:
+                        current_sentence += token
+                        if re.search(r'[.!?]\s*$', current_sentence) or '\n' in current_sentence:
+                            to_speak = current_sentence.strip().replace('*', '')
+                            current_sentence = ""
+                            if to_speak and not is_interrupted:
+                                await _speak_sentence(to_speak)
+
+                if has_started_streaming:
+                    if should_speak and current_sentence.strip() and not is_interrupted:
+                        await _speak_sentence(current_sentence.strip().replace('*', ''))
+                    await websocket.send_text(json.dumps({"type": "stream_end"}))
+                    if should_speak:
+                        await websocket.send_text(json.dumps({"type": "speaking_end"}))
+
+                if response_content.strip():
+                    messages.append({"role": "assistant", "content": response_content.strip()})
+                    with db_lock:
+                        cursor.execute("INSERT INTO history (role, content) VALUES (?, ?)", ("assistant", response_content.strip()))
+                        db_conn.commit()
+                    return
+            except Exception as ex:
+                print(f"[Gemini] Chat streaming failed, falling back to local: {ex}")
+
         async with httpx.AsyncClient(timeout=120.0) as client:
             while True:
                 if is_interrupted:
@@ -1109,7 +1581,7 @@ async def websocket_endpoint(websocket: WebSocket):
                                         if not has_started_streaming:
                                             await websocket.send_text(json.dumps({
                                                 "type": "status",
-                                                "content": "EXECUTING ACTION..."
+                                                "content": "Running action..."
                                             }))
                                             has_started_streaming = True
                                             
@@ -1134,7 +1606,7 @@ async def websocket_endpoint(websocket: WebSocket):
                                                     is_tool_call = True
                                                     await websocket.send_text(json.dumps({
                                                         "type": "status",
-                                                        "content": "EXECUTING ACTION..."
+                                                        "content": "Running action..."
                                                     }))
                                                 else:
                                                     has_started_streaming = True
@@ -1146,25 +1618,13 @@ async def websocket_endpoint(websocket: WebSocket):
                                             "content": token
                                         }))
                                         
-                                        current_sentence += token
-                                        if re.search(r'[.!?]\s*$', current_sentence) or '\n' in current_sentence:
-                                            text_to_speak = current_sentence.strip().replace('*', '')
-                                            current_sentence = ""
-                                            if text_to_speak and not is_interrupted:
-                                                try:
-                                                    await websocket.send_text(json.dumps({"type": "speaking_start"}))
-                                                    communicate = edge_tts.Communicate(text_to_speak, "en-US-ChristopherNeural")
-                                                    audio_data = b""
-                                                    async for ac in communicate.stream():
-                                                        if is_interrupted:
-                                                            break
-                                                        if ac["type"] == "audio":
-                                                            audio_data += ac["data"]
-                                                    if audio_data and not is_interrupted:
-                                                        b64_audio = base64.b64encode(audio_data).decode('utf-8')
-                                                        await websocket.send_text(json.dumps({"type": "audio", "data": b64_audio}))
-                                                except Exception as e:
-                                                    print(f"TTS Error: {e}")
+                                        if should_speak:
+                                            current_sentence += token
+                                            if re.search(r'[.!?]\s*$', current_sentence) or '\n' in current_sentence:
+                                                text_to_speak = current_sentence.strip().replace('*', '')
+                                                current_sentence = ""
+                                                if text_to_speak and not is_interrupted:
+                                                    await _speak_sentence(text_to_speak)
 
                                 except json.JSONDecodeError:
                                     continue
@@ -1207,27 +1667,14 @@ async def websocket_endpoint(websocket: WebSocket):
                             cursor.execute("INSERT INTO history (role, content) VALUES (?, ?)", ("assistant", response_content.strip()))
                             db_conn.commit()
                         
-                        if current_sentence.strip() and not is_interrupted:
-                            text_to_speak = current_sentence.strip().replace('*', '')
-                            try:
-                                await websocket.send_text(json.dumps({"type": "speaking_start"}))
-                                communicate = edge_tts.Communicate(text_to_speak, "en-US-ChristopherNeural")
-                                audio_data = b""
-                                async for ac in communicate.stream():
-                                    if is_interrupted:
-                                        break
-                                    if ac["type"] == "audio":
-                                        audio_data += ac["data"]
-                                if audio_data and not is_interrupted:
-                                    b64_audio = base64.b64encode(audio_data).decode('utf-8')
-                                    await websocket.send_text(json.dumps({"type": "audio", "data": b64_audio}))
-                            except Exception as e:
-                                print(f"TTS Error: {e}")
+                        if should_speak and current_sentence.strip() and not is_interrupted:
+                            await _speak_sentence(current_sentence.strip().replace('*', ''))
                                 
                         if has_started_streaming:
                             await websocket.send_text(json.dumps({"type": "stream_end"}))
                         
-                        await websocket.send_text(json.dumps({"type": "speaking_end"}))
+                        if should_speak:
+                            await websocket.send_text(json.dumps({"type": "speaking_end"}))
                         break
                         
                 except asyncio.CancelledError:
@@ -1247,88 +1694,99 @@ async def websocket_endpoint(websocket: WebSocket):
             cpu = psutil.cpu_percent()
             ram = psutil.virtual_memory().percent
             if cpu > 90 or ram > 90:
-                text = f"Sir, system resources critical. CPU at {cpu} percent."
+                text = f"System resources critical: CPU at {cpu}%, RAM at {ram}%."
                 try:
-                    await websocket.send_text(json.dumps({"type": "stream_chunk", "content": f"\n\n[PROACTIVE WARNING] {text}"}))
-                    communicate = edge_tts.Communicate(text, "en-US-ChristopherNeural")
-                    audio_data = b""
-                    async for ac in communicate.stream():
-                        if ac["type"] == "audio":
-                            audio_data += ac["data"]
-                    if audio_data:
-                        b64_audio = base64.b64encode(audio_data).decode('utf-8')
-                        await websocket.send_text(json.dumps({"type": "audio", "data": b64_audio}))
+                    await websocket.send_text(json.dumps({"type": "system_notice", "content": text}))
                 except Exception:
                     pass
 
     monitor_task = asyncio.create_task(proactive_monitor())
 
     try:
-        await websocket.send_text(json.dumps({"type": "status", "content": "Igris online. Awaiting input."}))
+        await websocket.send_text(json.dumps({"type": "status", "content": "Ready"}))
         
         while True:
             data = await websocket.receive_text()
+            tts_flag = False
+            user_prompt_text = data
             
             try:
                 parsed_data = json.loads(data)
-                
-                if parsed_data.get("type") == "voice_input":
-                    try:
-                        b64_data = parsed_data.get("data", "")
-                        audio_bytes = base64.b64decode(b64_data)
-                        
-                        transcribed_text = await transcribe_audio(audio_bytes)
-                        
-                        if not transcribed_text:
+                if isinstance(parsed_data, dict):
+                    msg_type = parsed_data.get("type")
+                    
+                    if msg_type == "voice_input":
+                        try:
+                            b64_data = parsed_data.get("data", "")
+                            audio_bytes = base64.b64decode(b64_data)
+                            
+                            transcribed_text = await transcribe_audio(audio_bytes)
+                            
+                            if not transcribed_text:
+                                await websocket.send_text(json.dumps({
+                                    "type": "voice_empty",
+                                    "content": "No speech detected."
+                                }))
+                                continue
+                            
+                            # Send transcription back to frontend
                             await websocket.send_text(json.dumps({
-                                "type": "voice_empty",
-                                "content": "No speech detected."
+                                "type": "transcription",
+                                "text": transcribed_text
                             }))
-                            continue
+                            
+                            if current_task and not current_task.done():
+                                is_interrupted = True
+                                current_task.cancel()
+                                try:
+                                    await current_task
+                                except (asyncio.CancelledError, Exception):
+                                    pass
+                                # Notify frontend so it exits SPEAKING state
+                                await websocket.send_text(json.dumps({"type": "interrupted"}))
+                                await websocket.send_text(json.dumps({"type": "speaking_end"}))
+                                await websocket.send_text(json.dumps({"type": "stream_end"}))
+                            
+                            current_task = asyncio.create_task(process_llm(transcribed_text, is_voice=True, tts_enabled=True))
+                            
+                        except Exception as e:
+                            await websocket.send_text(json.dumps({
+                                "type": "voice_error",
+                                "content": f"Audio processing failed: {e}"
+                            }))
+                        continue
                         
-                        # Send transcription back to frontend
-                        await websocket.send_text(json.dumps({
-                            "type": "transcription",
-                            "text": transcribed_text
-                        }))
-                        
+                    elif msg_type == "interrupt":
+                        is_interrupted = True
                         if current_task and not current_task.done():
-                            is_interrupted = True
                             current_task.cancel()
                             try:
                                 await current_task
                             except (asyncio.CancelledError, Exception):
                                 pass
-                            # Notify frontend so it exits SPEAKING state
-                            await websocket.send_text(json.dumps({"type": "interrupted"}))
-                            await websocket.send_text(json.dumps({"type": "speaking_end"}))
-                            await websocket.send_text(json.dumps({"type": "stream_end"}))
-                        
-                        current_task = asyncio.create_task(process_llm(transcribed_text, is_voice=True))
-                        
-                    except Exception as e:
-                        await websocket.send_text(json.dumps({
-                            "type": "voice_error",
-                            "content": f"Audio processing failed: {e}"
-                        }))
-                    continue
-                    
-                elif parsed_data.get("type") == "interrupt":
-                    is_interrupted = True
-                    if current_task and not current_task.done():
-                        current_task.cancel()
-                        try:
-                            await current_task
-                        except (asyncio.CancelledError, Exception):
-                            pass
-                    await websocket.send_text(json.dumps({"type": "interrupted"}))
-                    await websocket.send_text(json.dumps({"type": "stream_end"}))
-                    messages.append({"role": "user", "content": "[SYSTEM NOTIFICATION: The user interrupted you.]"})
-                    continue
+                        await websocket.send_text(json.dumps({"type": "interrupted"}))
+                        await websocket.send_text(json.dumps({"type": "stream_end"}))
+                        messages.append({"role": "user", "content": "[SYSTEM NOTIFICATION: The user interrupted you.]"})
+                        continue
 
-                elif parsed_data.get("type") == "ping":
-                    await websocket.send_text(json.dumps({"type": "pong"}))
-                    continue
+                    elif msg_type == "clear_history":
+                        with db_lock:
+                            cursor.execute("DELETE FROM history")
+                            db_conn.commit()
+                        messages.clear()
+                        messages.append({"role": "system", "content": SYSTEM_PROMPT})
+                        await websocket.send_text(json.dumps({"type": "history_cleared"}))
+                        continue
+
+                    elif msg_type == "ping":
+                        await websocket.send_text(json.dumps({"type": "pong"}))
+                        continue
+
+                    elif msg_type == "chat":
+                        user_prompt_text = str(parsed_data.get("text", "")).strip()
+                        tts_flag = bool(parsed_data.get("tts", False))
+                        if not user_prompt_text:
+                            continue
                     
             except json.JSONDecodeError:
                 pass
@@ -1341,11 +1799,127 @@ async def websocket_endpoint(websocket: WebSocket):
                 except (asyncio.CancelledError, Exception):
                     pass
                 
-            current_task = asyncio.create_task(process_llm(data))
+            current_task = asyncio.create_task(process_llm(user_prompt_text, is_voice=False, tts_enabled=tts_flag))
             
     except WebSocketDisconnect:
         print("Client disconnected")
+    finally:
+        monitor_task.cancel()
+
+# ============================================================
+# WebSocket Endpoint — Google Assistant Gemini Live Multimodal
+# Real-time full-duplex speech-to-speech (<800ms) with native tool calls
+# ============================================================
+
+@app.websocket("/ws/live")
+async def websocket_live_endpoint(websocket: WebSocket):
+    origin = websocket.headers.get("origin", "")
+    allowed_origins = {"", "file://", "null", "http://127.0.0.1:8000", "http://localhost:8000"}
+    if origin and origin not in allowed_origins:
+        await websocket.close(code=4003, reason="Origin not allowed")
+        return
+    await websocket.accept()
+
+    ai_cfg = gemini_service.get_ai_settings(db_conn, db_lock, mask_key=False)
+    api_key = ai_cfg.get("api_key", "")
+    if not api_key:
+        await websocket.send_text(json.dumps({
+            "type": "error",
+            "message": "Google Gemini API key required for real-time Live Voice. Open Settings -> Cloud AI to enter your free key.",
+            "code": "NO_API_KEY"
+        }))
+        await websocket.close()
+        return
+
+    # Callbacks to bridge Gemini Live events directly to frontend
+    async def on_audio_out(b64_pcm_24k: str):
+        try:
+            await websocket.send_text(json.dumps({
+                "type": "audio",
+                "data": b64_pcm_24k
+            }))
+        except Exception:
+            pass
+
+    async def on_text_out(text_chunk: str):
+        try:
+            await websocket.send_text(json.dumps({
+                "type": "text_chunk",
+                "text": text_chunk
+            }))
+        except Exception:
+            pass
+
+    async def on_interrupted():
+        try:
+            await websocket.send_text(json.dumps({"type": "interrupted"}))
+        except Exception:
+            pass
+
+    async def on_turn_complete():
+        try:
+            await websocket.send_text(json.dumps({"type": "turn_complete"}))
+        except Exception:
+            pass
+
+    async def tool_executor(name: str, args: dict):
+        try:
+            await websocket.send_text(json.dumps({
+                "type": "tool_executing",
+                "name": name,
+                "args": args
+            }))
+        except Exception:
+            pass
+        res = await execute_tool(name, args, websocket=websocket)
+        return res
+
+    session = gemini_service.GeminiLiveSession(
+        api_key=api_key,
+        voice=ai_cfg.get("voice", gemini_service.DEFAULT_VOICE),
+        model=gemini_service.DEFAULT_MODEL,
+        tool_executor=tool_executor,
+        on_audio_out=on_audio_out,
+        on_text_out=on_text_out,
+        on_interrupted=on_interrupted,
+        on_turn_complete=on_turn_complete,
+    )
+
+    started = await session.start()
+    if not started:
+        await websocket.send_text(json.dumps({
+            "type": "error",
+            "message": "Could not connect to Google Gemini Live API. Please verify your API key or network connection.",
+            "code": "CONNECTION_FAILED"
+        }))
+        await websocket.close()
+        return
+
+    await websocket.send_text(json.dumps({
+        "type": "session_ready",
+        "voice": ai_cfg.get("voice", gemini_service.DEFAULT_VOICE)
+    }))
+
+    try:
+        while True:
+            msg = await websocket.receive_text()
+            try:
+                data = json.loads(msg)
+                mtype = data.get("type")
+                if mtype == "audio_chunk":
+                    # Send raw 16kHz PCM audio chunk to Gemini
+                    await session.send_audio_chunk(data.get("data", ""))
+                elif mtype == "text_turn":
+                    await session.send_text_turn(data.get("text", ""))
+                elif mtype == "ping":
+                    await websocket.send_text(json.dumps({"type": "pong"}))
+            except json.JSONDecodeError:
+                pass
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await session.stop()
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=False)
