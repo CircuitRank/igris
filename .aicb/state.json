@@ -6,18 +6,32 @@
       "path": "/home/voldemort/igris/README.md",
       "pinnedBy": "auto:spec",
       "note": "Project README",
-      "pinnedAt": 1793721741421,
+      "pinnedAt": 1793765730777,
       "auto": "spec",
       "role": "spec"
     },
     {
-      "path": "/home/voldemort/igris/backend/gemini_service.py",
+      "path": "/home/voldemort/igris/METHODOLOGY.md",
       "pinnedBy": "auto:editor",
-      "pinnedAt": 1793725960478,
+      "pinnedAt": 1793767666643,
       "auto": "recent-edit",
-      "expiresAt": 1793729560478
+      "expiresAt": 1793771266643
+    },
+    {
+      "path": "/home/voldemort/igris/WORKFLOW.md",
+      "pinnedBy": "auto:editor",
+      "pinnedAt": 1793767669675,
+      "auto": "recent-edit",
+      "expiresAt": 1793771269675
+    },
+    {
+      "path": "/home/voldemort/igris/start.bat",
+      "pinnedBy": "auto:editor",
+      "pinnedAt": 1793765878509,
+      "auto": "dwell",
+      "expiresAt": 1793769478509
     }
   ],
   "skills": [],
-  "updatedAt": 1793725960478
+  "updatedAt": 1793767669675
 }
